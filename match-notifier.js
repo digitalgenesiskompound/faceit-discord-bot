@@ -491,7 +491,7 @@ async function sendMatchNotification(match, channel = null) {
       })
       .setTimestamp();
     
-// Create RSVP buttons
+    // Create RSVP buttons
     const rsvpRow = new ActionRowBuilder()
       .addComponents(
         new ButtonBuilder()
