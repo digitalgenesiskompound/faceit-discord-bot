@@ -1,9 +1,10 @@
 require('dotenv').config();
-const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const axios = require('axios');
 const cron = require('node-cron');
 const fs = require('fs');
 const http = require('http');
+const path = require('path');
 
 // Configuration
 const FACEIT_API_KEY = process.env.FACEIT_API_KEY;
@@ -13,10 +14,11 @@ const TEAM_ID = process.env.TEAM_ID || 'cfbb8afd-6ab6-44a9-bf07-3de4f86889af';
 const COMPETITION_ID = 'f5aec3e5-57e5-4dde-a9d5-4e630766bc14';
 
 // File paths
-const DATA_DIR = '/app/data';
-const PROCESSED_MATCHES_FILE = `${DATA_DIR}/processed_matches.json`;
-const USER_MAPPINGS_FILE = `${DATA_DIR}/user_mappings.json`;
-const RSVP_STATUS_FILE = `${DATA_DIR}/rsvp_status.json`;
+const DATA_DIR = path.join(__dirname, 'data');
+const PROCESSED_MATCHES_FILE = path.join(DATA_DIR, 'processed_matches.json');
+const USER_MAPPINGS_FILE = path.join(DATA_DIR, 'user_mappings.json');
+const RSVP_STATUS_FILE = path.join(DATA_DIR, 'rsvp_status.json');
+const MATCH_THREADS_FILE = path.join(DATA_DIR, 'match_threads.json');
 
 // Discord client setup
 const client = new Client({ 
@@ -68,8 +70,27 @@ try {
   console.error(`Error loading RSVP status: ${err.message}`);
 }
 
-// Track current match ID (for RSVP purposes)
-let currentMatchId = null;
+// Load match threads
+let matchThreadsData = {};
+try {
+  if (fs.existsSync(MATCH_THREADS_FILE)) {
+    matchThreadsData = JSON.parse(fs.readFileSync(MATCH_THREADS_FILE, 'utf8'));
+    // Convert to Map for easier usage
+    for (const [matchId, threadId] of Object.entries(matchThreadsData)) {
+      matchThreads.set(matchId, threadId);
+    }
+    console.log(`Loaded ${matchThreads.size} match thread mappings`);
+  }
+} catch (err) {
+  console.error(`Error loading match threads: ${err.message}`);
+}
+
+// Track all upcoming matches for RSVP purposes
+let upcomingMatches = new Map(); // matchId -> match data
+let matchThreads = new Map(); // matchId -> thread channel ID
+
+// Store temporary search results for users (expires after 30 minutes)
+const userSearchResults = new Map();
 
 // Format date for multiple time zones
 function formatMatchTime(timestamp) {
@@ -105,8 +126,11 @@ function formatMatchTime(timestamp) {
   };
 }
 
-// API request function
-async function makeApiRequest(url, options = {}) {
+// API request function with retry logic and rate limiting
+async function makeApiRequest(url, options = {}, retryCount = 0) {
+  const maxRetries = 3;
+  const retryDelay = 1000; // 1 second base delay
+  
   try {
     const headers = {
       'Authorization': `Bearer ${FACEIT_API_KEY}`,
@@ -114,13 +138,36 @@ async function makeApiRequest(url, options = {}) {
       ...options.headers
     };
     
-    const response = await axios.get(url, { ...options, headers });
+    const response = await axios.get(url, { 
+      ...options, 
+      headers,
+      timeout: 15000 // 15 second timeout
+    });
+    
     return response.data;
   } catch (error) {
     console.error(`API Error (${url}): ${error.message}`);
+    
     if (error.response) {
       console.error(`Status: ${error.response.status}`);
+      
+      // Retry on rate limiting (429) or server errors (5xx)
+      if ((error.response.status === 429 || error.response.status >= 500) && retryCount < maxRetries) {
+        const delay = retryDelay * Math.pow(2, retryCount); // Exponential backoff
+        console.log(`Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        return makeApiRequest(url, options, retryCount + 1);
+      }
     }
+    
+    // Handle network timeouts and connection errors
+    if ((error.code === 'ECONNABORTED' || error.code === 'ETIMEDOUT') && retryCount < maxRetries) {
+      const delay = retryDelay * Math.pow(2, retryCount);
+      console.log(`Network error, retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
+      await new Promise(resolve => setTimeout(resolve, delay));
+      return makeApiRequest(url, options, retryCount + 1);
+    }
+    
     return null;
   }
 }
@@ -154,6 +201,17 @@ function saveRsvpStatus() {
   }
 }
 
+// Save match threads
+function saveMatchThreads() {
+  try {
+    const threadsObj = Object.fromEntries(matchThreads);
+    fs.writeFileSync(MATCH_THREADS_FILE, JSON.stringify(threadsObj, null, 2));
+    console.log(`Saved ${matchThreads.size} match thread mappings`);
+  } catch (err) {
+    console.error(`Error saving match threads: ${err.message}`);
+  }
+}
+
 // RSVP utility functions
 function addRsvp(matchId, discordId, response, faceitNickname) {
   if (!rsvpStatus[matchId]) {
@@ -168,6 +226,9 @@ function addRsvp(matchId, discordId, response, faceitNickname) {
   
   saveRsvpStatus();
   console.log(`RSVP recorded: ${faceitNickname} (${discordId}) -> ${response} for match ${matchId}`);
+  
+  // Update thread RSVP status if thread exists
+  updateThreadRsvpStatusAsync(matchId);
 }
 
 function getRsvpForMatch(matchId) {
@@ -235,6 +296,120 @@ function removeUserMapping(discordId) {
   return null;
 }
 
+// Update RSVP status in match thread
+async function updateThreadRsvpStatus(matchId, thread = null) {
+  try {
+    // Get thread if not provided
+    if (!thread) {
+      const threadId = matchThreads.get(matchId);
+      if (!threadId) return; // No thread for this match
+      
+      thread = await client.channels.fetch(threadId);
+      if (!thread) return;
+    }
+    
+    // Get match data
+    const match = upcomingMatches.get(matchId);
+    if (!match) return;
+    
+    // Get all team players
+    const teamPlayers = await listTeamPlayers();
+    if (teamPlayers.length === 0) return;
+    
+    // Get current RSVPs
+    const matchRsvps = getRsvpForMatch(matchId);
+    
+    // Categorize players
+    const attendingPlayers = [];
+    const notAttendingPlayers = [];
+    const noResponsePlayers = [];
+    
+    for (const player of teamPlayers) {
+      // Find if this player has an RSVP
+      const userMapping = Object.values(userMappings).find(mapping => 
+        mapping.faceit_nickname === player.nickname
+      );
+      
+      if (userMapping && matchRsvps[userMapping.discord_id]) {
+        const rsvp = matchRsvps[userMapping.discord_id];
+        if (rsvp.response === 'yes') {
+          attendingPlayers.push(player.nickname);
+        } else {
+          notAttendingPlayers.push(player.nickname);
+        }
+      } else {
+        noResponsePlayers.push(player.nickname);
+      }
+    }
+    
+    // Create embed with current status
+    const faction1 = match.teams.faction1?.name || 'TBD';
+    const faction2 = match.teams.faction2?.name || 'TBD';
+    const matchTimes = formatMatchTime(match.scheduled_at);
+    
+    const embed = new EmbedBuilder()
+      .setTitle('📝 Match RSVP Status')
+      .setDescription(`**${faction1} vs ${faction2}**\n📅 ${matchTimes.pacific}\n\n*This list updates automatically when players RSVP*`)
+      .setColor(0x0099ff)
+      .setTimestamp();
+    
+    if (attendingPlayers.length > 0) {
+      embed.addFields({
+        name: `✅ Attending (${attendingPlayers.length})`,
+        value: attendingPlayers.join('\n'),
+        inline: true
+      });
+    }
+    
+    if (notAttendingPlayers.length > 0) {
+      embed.addFields({
+        name: `❌ Not Attending (${notAttendingPlayers.length})`,
+        value: notAttendingPlayers.join('\n'),
+        inline: true
+      });
+    }
+    
+    if (noResponsePlayers.length > 0) {
+      embed.addFields({
+        name: `⏳ No Response (${noResponsePlayers.length})`,
+        value: noResponsePlayers.join('\n'),
+        inline: true
+      });
+    }
+    
+    embed.addFields({
+      name: 'How to RSVP',
+      value: 'Use the buttons on the original announcement or type `!rsvp yes` / `!rsvp no` in the main channel.',
+      inline: false
+    });
+    
+    // Find existing RSVP status message in thread and update it, or send new one
+    const messages = await thread.messages.fetch({ limit: 10 });
+    const existingMessage = messages.find(msg => 
+      msg.author.id === client.user.id && 
+      msg.embeds.length > 0 && 
+      msg.embeds[0].title === '📝 Match RSVP Status'
+    );
+    
+    if (existingMessage) {
+      await existingMessage.edit({ embeds: [embed] });
+    } else {
+      await thread.send({ embeds: [embed] });
+    }
+    
+  } catch (err) {
+    console.error(`Error updating thread RSVP status: ${err.message}`);
+  }
+}
+
+// Async wrapper for thread updates
+async function updateThreadRsvpStatusAsync(matchId) {
+  // Use setTimeout to avoid blocking the main RSVP response
+  setTimeout(async () => {
+    await updateThreadRsvpStatus(matchId);
+  }, 1000);
+}
+
 // Mark a match as processed
 function markMatchAsProcessed(matchId) {
   if (!processedMatches.includes(matchId)) {
@@ -251,17 +426,23 @@ async function sendMatchNotification(match, channel = null) {
       return;
     }
     
+    // Check if we already have a thread for this match (prevent duplicates)
+    if (matchThreads.has(match.match_id)) {
+      console.log(`Thread already exists for match ${match.match_id}, skipping notification`);
+      return;
+    }
+    
     const faction1 = match.teams.faction1.name;
     const faction2 = match.teams.faction2.name;
     const matchTimes = formatMatchTime(match.scheduled_at);
     const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
     
-    // Set current match ID for RSVP purposes
-    currentMatchId = match.match_id;
+    // Store match data for RSVP purposes
+    upcomingMatches.set(match.match_id, match);
     
     const embed = new EmbedBuilder()
       .setTitle(`🎮 Upcoming FACEIT Match: ${faction1} vs ${faction2}`)
-      .setDescription(`**Times:**\n${matchTimes.pacific}\n${matchTimes.mountain}\n\n**Competition:** ${match.competition_name || 'ESEA Season'}\n\n**RSVP for this match:** \`!rsvp yes\` or \`!rsvp no\``)
+      .setDescription(`**Times:**\n${matchTimes.pacific}\n${matchTimes.mountain}\n\n**Competition:** ${match.competition_name || 'ESEA Season'}\n\n**RSVP for this match:** Use the buttons below or type \`!rsvp yes\` or \`!rsvp no\``)
       .setColor(0x00ff00)
       .addFields({
         name: 'Match Details',
@@ -269,16 +450,53 @@ async function sendMatchNotification(match, channel = null) {
       })
       .setTimestamp();
     
+// Create RSVP buttons
+    const rsvpRow = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(`rsvp_yes_${match.match_id}`)
+          .setLabel('✅ Attending')
+          .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+          .setCustomId(`rsvp_no_${match.match_id}`)
+          .setLabel('❌ Not Attending')
+          .setStyle(ButtonStyle.Danger)
+      );
+    // Create status button row
+    const statusRow = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId(`rsvp_status_${match.match_id}`)
+          .setLabel('📋 View RSVPs')
+          .setStyle(ButtonStyle.Secondary)
+      );
+    
     console.log(`Sending notification for match: ${match.match_id} (${faction1} vs ${faction2})`);
     
-    // Send to specified channel or default notification channel
+// Send to specified channel or default notification channel
     const targetChannel = channel || client.channels.cache.get(DISCORD_CHANNEL_ID);
     
     if (targetChannel) {
-      await targetChannel.send({
+      const message = await targetChannel.send({
         content: "New match scheduled!",
-        embeds: [embed]
+        embeds: [embed],
+        components: [rsvpRow, statusRow]
       });
+      
+      // Create a thread for the match discussion
+      const thread = await message.startThread({
+        name: `Match Discussion: ${faction1} vs ${faction2}`,
+        autoArchiveDuration: 60
+      });
+
+      // Store thread reference for this match
+      matchThreads.set(match.match_id, thread.id);
+      saveMatchThreads();
+      
+      // Send initial RSVP status message in thread
+      await updateThreadRsvpStatus(match.match_id, thread);
+
+      console.log(`Thread created for match: ${thread.name}`);
       
       console.log('Notification sent successfully!');
       
@@ -389,10 +607,50 @@ async function getUpcomingMatches() {
   return matches;
 }
 
+// Clean up old RSVP data for concluded matches
+async function cleanupOldRsvpData() {
+  try {
+    console.log('Cleaning up old RSVP data...');
+    
+    // Get current upcoming matches
+    const upcomingMatches = await getUpcomingMatches();
+    const upcomingMatchIds = new Set(upcomingMatches.map(match => match.match_id));
+    
+    let removedCount = 0;
+    
+    // Remove RSVP data for matches that are no longer upcoming
+    for (const matchId of Object.keys(rsvpStatus)) {
+      if (!upcomingMatchIds.has(matchId)) {
+        delete rsvpStatus[matchId];
+        removedCount++;
+      }
+    }
+    
+    // Clean up thread mappings for old matches
+    for (const matchId of matchThreads.keys()) {
+      if (!upcomingMatchIds.has(matchId)) {
+        matchThreads.delete(matchId);
+      }
+    }
+    
+    if (removedCount > 0) {
+      console.log(`Cleaned up RSVP data for ${removedCount} concluded matches`);
+      saveRsvpStatus();
+      saveMatchThreads();
+    }
+    
+  } catch (err) {
+    console.error(`Error cleaning up old RSVP data: ${err.message}`);
+  }
+}
+
 // Main check function
 async function checkMatches() {
   try {
     console.log('Checking for upcoming matches...');
+    
+    // Clean up old data first
+    await cleanupOldRsvpData();
     
     // Get all upcoming matches
     const matches = await getUpcomingMatches();
@@ -422,11 +680,33 @@ client.once('ready', () => {
   checkMatches();
 });
 
+// Function to list all players on the team
+async function listTeamPlayers() {
+  try {
+    console.log('Fetching team players...');
+    const teamData = await makeApiRequest(`https://open.faceit.com/data/v4/teams/${TEAM_ID}`);
+    
+    if (teamData && teamData.members) {
+      console.log(`Found ${teamData.members.length} players`);
+      return teamData.members;
+    }
+    console.log('No players found');
+    return [];
+  } catch (error) {
+    console.error(`Error fetching team players: ${error.message}`);
+    return [];
+  }
+}
+
 // Command handling
 client.on('messageCreate', async (message) => {
-  // Ignore messages from bots
-  console.log(`Received message: ${message.content} from ${message.author.tag}`);
-  if (message.author.bot) return;
+  // Ignore messages from bots and system messages
+  if (message.author.bot || message.system) return;
+  
+  // Only log non-bot messages to reduce noise
+  if (message.content.startsWith('!')) {
+    console.log(`Command received: ${message.content} from ${message.author.tag}`);
+  }
   
   // Handle !rsvp command
   if (message.content.toLowerCase().startsWith('!rsvp')) {
@@ -439,33 +719,109 @@ client.on('messageCreate', async (message) => {
     
     const response = args[1]; // 'yes' or 'no'
     const userId = message.author.id;
+    const matchSelector = args[2]; // Optional: match number or match ID
     
     try {
       // Check if user is registered
       const userMapping = getUserMappingByDiscordId(userId);
       if (!userMapping) {
-        await message.reply('❌ You must be registered with a FACEIT account to RSVP. Use `!register <nickname>` then `!link <player_id>` first.');
+        await message.reply('❌ You must be linked to a FACEIT account to RSVP. Use `!register` to see available players, then `!link <nickname>` to link your account.');
         return;
       }
       
-      // Check if there's a current match to RSVP for
-      if (!currentMatchId) {
-        await message.reply('❌ No current match available for RSVP. RSVPs are available when matches are announced.');
+      // Get upcoming matches
+      const matches = await getUpcomingMatches();
+      if (matches.length === 0) {
+        await message.reply('❌ No upcoming matches found. Use `!matches` to see available matches.');
         return;
       }
       
-      // Check if user already has an RSVP for this match
-      const existingRsvp = getUserRsvp(currentMatchId, userId);
+      // Check if user provided a match selector (number or ID)
+      if (matchSelector) {
+        let selectedMatch = null;
+        
+        // Try to parse as match number (1, 2, 3, etc.)
+        const matchNumber = parseInt(matchSelector);
+        if (!isNaN(matchNumber) && matchNumber >= 1 && matchNumber <= matches.length) {
+          selectedMatch = matches[matchNumber - 1];
+        } else {
+          // Try to find by match ID
+          selectedMatch = matches.find(match => match.match_id === matchSelector);
+        }
+        
+        if (!selectedMatch) {
+          await message.reply(`❌ Could not find match "${matchSelector}". Use \`!matches\` to see available matches, or try \`!rsvp ${response} 1\` for the first match.`);
+          return;
+        }
+        
+        // Process RSVP for selected match
+        const matchId = selectedMatch.match_id;
+        upcomingMatches.set(matchId, selectedMatch);
+        
+        const existingRsvp = getUserRsvp(matchId, userId);
+        addRsvp(matchId, userId, response, userMapping.faceit_nickname);
+        
+        const responseEmoji = response === 'yes' ? '✅' : '❌';
+        const actionText = existingRsvp ? 'updated' : 'recorded';
+        const matchName = `${selectedMatch.teams.faction1.name} vs ${selectedMatch.teams.faction2.name}`;
+        const matchTimes = formatMatchTime(selectedMatch.scheduled_at);
+        
+        await message.reply(`${responseEmoji} Your RSVP has been ${actionText} for:\n**${matchName}**\n📅 ${matchTimes.pacific}\n\n**${userMapping.faceit_nickname}** - ${response.toUpperCase()}`);
+        
+        console.log(`RSVP ${actionText}: ${message.author.tag} (${userMapping.faceit_nickname}) -> ${response} for match ${matchId}`);
+        return;
+      }
       
-      // Add/update RSVP
-      addRsvp(currentMatchId, userId, response, userMapping.faceit_nickname);
-      
-      const responseEmoji = response === 'yes' ? '✅' : '❌';
-      const actionText = existingRsvp ? 'updated' : 'recorded';
-      
-      await message.reply(`${responseEmoji} Your RSVP has been ${actionText}! **${userMapping.faceit_nickname}** - ${response.toUpperCase()}`);
-      
-      console.log(`RSVP ${actionText}: ${message.author.tag} (${userMapping.faceit_nickname}) -> ${response} for match ${currentMatchId}`);
+      // If only one match, auto-select it. If multiple, ask user to specify.
+      if (matches.length === 1) {
+        const matchId = matches[0].match_id;
+        upcomingMatches.set(matchId, matches[0]);
+        
+        // Check if user already has an RSVP for this match
+        const existingRsvp = getUserRsvp(matchId, userId);
+        
+        // Add/update RSVP
+        addRsvp(matchId, userId, response, userMapping.faceit_nickname);
+        
+        const responseEmoji = response === 'yes' ? '✅' : '❌';
+        const actionText = existingRsvp ? 'updated' : 'recorded';
+        const match = matches[0];
+        const matchName = `${match.teams.faction1.name} vs ${match.teams.faction2.name}`;
+        const matchTimes = formatMatchTime(match.scheduled_at);
+        
+        await message.reply(`${responseEmoji} Your RSVP has been ${actionText} for:\n**${matchName}**\n📅 ${matchTimes.pacific}\n\n**${userMapping.faceit_nickname}** - ${response.toUpperCase()}`);
+        
+        console.log(`RSVP ${actionText}: ${message.author.tag} (${userMapping.faceit_nickname}) -> ${response} for match ${matchId}`);
+        return;
+      } else {
+        // Multiple matches - show them with numbered options for easier selection
+        const embed = new EmbedBuilder()
+          .setTitle('🎮 Multiple Matches Available')
+          .setDescription(`**Which match do you want to RSVP '${response.toUpperCase()}' for?**\n\nYou can:\n• Use the buttons on match notifications\n• Or reply with the match number: \`!rsvp ${response} 1\` (for first match)`)
+          .setColor(0xff9900)
+          .setTimestamp();
+        
+        matches.forEach((match, index) => {
+          const faction1 = match.teams.faction1?.name || 'TBD';
+          const faction2 = match.teams.faction2?.name || 'TBD';
+          const matchTimes = formatMatchTime(match.scheduled_at);
+          
+          embed.addFields({
+            name: `${index + 1}. ${faction1} vs ${faction2}`,
+            value: `📅 ${matchTimes.pacific}\n🆔 \`${match.match_id}\``,
+            inline: false
+          });
+        });
+        
+        embed.addFields({
+          name: '📝 How to RSVP',
+          value: `\`!rsvp ${response} 1\` - RSVP for match #1\n\`!rsvp ${response} 2\` - RSVP for match #2\n\n*Or use the buttons on the match notifications!*`,
+          inline: false
+        });
+        
+        await message.reply({ embeds: [embed] });
+        return;
+      }
       
     } catch (err) {
       console.error(`Error handling !rsvp command: ${err.message}`);
@@ -473,60 +829,60 @@ client.on('messageCreate', async (message) => {
     }
   }
   
-  // Handle !rsvps command to view current RSVP status
+  // Handle !rsvps command to view all RSVP statuses for upcoming matches
   if (message.content.toLowerCase() === '!rsvps') {
     try {
-      if (!currentMatchId) {
-        await message.reply('❌ No current match available for RSVP viewing.');
+      const matches = await getUpcomingMatches();
+      if (matches.length === 0) {
+        await message.reply('❌ No upcoming matches found.');
         return;
-      }
-      
-      const matchRsvps = getRsvpForMatch(currentMatchId);
-      
-      if (Object.keys(matchRsvps).length === 0) {
-        await message.reply('📝 No RSVPs yet for the current match.');
-        return;
-      }
-      
-      const yesRsvps = [];
-      const noRsvps = [];
-      
-      for (const [discordId, rsvpData] of Object.entries(matchRsvps)) {
-        const entry = `${rsvpData.faceit_nickname}`;
-        if (rsvpData.response === 'yes') {
-          yesRsvps.push(entry);
-        } else {
-          noRsvps.push(entry);
-        }
       }
       
       const embed = new EmbedBuilder()
-        .setTitle('📝 Match RSVP Status')
-        .setDescription(`Current RSVPs for match ID: \`${currentMatchId}\``)
+        .setTitle('📝 All Match RSVP Status')
+        .setDescription('RSVP status for all upcoming matches:')
         .setColor(0x0099ff)
         .setTimestamp();
       
-      if (yesRsvps.length > 0) {
-        embed.addFields({
-          name: '✅ Attending',
-          value: yesRsvps.join('\n'),
-          inline: true
-        });
+      let hasAnyRsvps = false;
+      
+      for (const match of matches) {
+        const matchRsvps = getRsvpForMatch(match.match_id);
+        
+        if (Object.keys(matchRsvps).length > 0) {
+          hasAnyRsvps = true;
+          const faction1 = match.teams.faction1?.name || 'TBD';
+          const faction2 = match.teams.faction2?.name || 'TBD';
+          const matchTimes = formatMatchTime(match.scheduled_at);
+          
+          const yesRsvps = [];
+          const noRsvps = [];
+          
+          for (const [discordId, rsvpData] of Object.entries(matchRsvps)) {
+            if (rsvpData.response === 'yes') {
+              yesRsvps.push(rsvpData.faceit_nickname);
+            } else {
+              noRsvps.push(rsvpData.faceit_nickname);
+            }
+          }
+          
+          let fieldValue = `📅 ${matchTimes.pacific}\n`;
+          if (yesRsvps.length > 0) fieldValue += `✅ **Attending:** ${yesRsvps.join(', ')}\n`;
+          if (noRsvps.length > 0) fieldValue += `❌ **Not Attending:** ${noRsvps.join(', ')}\n`;
+          fieldValue += `🆔 \`${match.match_id}\``;
+          
+          embed.addFields({
+            name: `🎮 ${faction1} vs ${faction2}`,
+            value: fieldValue,
+            inline: false
+          });
+        }
       }
       
-      if (noRsvps.length > 0) {
-        embed.addFields({
-          name: '❌ Not Attending',
-          value: noRsvps.join('\n'),
-          inline: true
-        });
+      if (!hasAnyRsvps) {
+        await message.reply('📝 No RSVPs yet for any upcoming matches.');
+        return;
       }
-      
-      embed.addFields({
-        name: 'Total Responses',
-        value: `${Object.keys(matchRsvps).length} player(s)`,
-        inline: false
-      });
       
       await message.reply({ embeds: [embed] });
       
@@ -597,14 +953,6 @@ client.on('messageCreate', async (message) => {
         inline: false
       });
       
-      // Add a note if this is the current match
-      if (matchId === currentMatchId) {
-        embed.addFields({
-          name: '🎯 Current Match',
-          value: 'This is the current active match for RSVPs',
-          inline: false
-        });
-      }
       
       await message.reply({ embeds: [embed] });
       
@@ -642,9 +990,13 @@ client.on('messageCreate', async (message) => {
         const faction2 = match.teams.faction2?.name || 'TBD';
         const matchTimes = formatMatchTime(match.scheduled_at);
         const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
-        const isCurrentMatch = match.match_id === currentMatchId ? ' **(Current)**' : '';
         
-        description += `**${index + 1}.** ${faction1} vs ${faction2}${isCurrentMatch}\n`;
+        // Check if this match has any RSVPs
+        const matchRsvps = getRsvpForMatch(match.match_id);
+        const rsvpCount = Object.keys(matchRsvps).length;
+        const rsvpIndicator = rsvpCount > 0 ? ` (${rsvpCount} RSVPs)` : '';
+        
+        description += `**${index + 1}.** ${faction1} vs ${faction2}${rsvpIndicator}\n`;
         description += `📅 ${matchTimes.pacific} / ${matchTimes.mountain}\n`;
         description += `🔗 [View Match](${matchUrl})\n`;
         description += `🆔 Match ID: \`${match.match_id}\`\n\n`;
@@ -652,13 +1004,11 @@ client.on('messageCreate', async (message) => {
       
       embed.setDescription(description);
       
-      if (currentMatchId) {
-        embed.addFields({
-          name: '📝 RSVP',
-          value: `Use \`!rsvp yes\` or \`!rsvp no\` to RSVP for the current match.\nUse \`!rsvps\` to view all responses.`,
-          inline: false
-        });
-      }
+      embed.addFields({
+        name: '📝 RSVP',
+        value: `Use \`!rsvp yes\` or \`!rsvp no\` to RSVP for matches.\n\`!rsvps\` - View all RSVP responses\n\`!status [match_id]\` - View RSVPs for specific match`,
+        inline: false
+      });
       
       await message.reply({ embeds: [embed] });
       
@@ -674,6 +1024,13 @@ client.on('messageCreate', async (message) => {
       const matches = await getUpcomingMatches();
       console.log(`getUpcomingMatches() returned ${matches.length} matches`);
       if (matches.length > 0) {
+        // Check if thread already exists for this match
+        const existingThread = matchThreads.get(matches[0].match_id);
+        if (existingThread) {
+          await message.reply(`Test notification skipped - thread already exists for match ${matches[0].match_id}`);
+          return;
+        }
+        
         await sendMatchNotification(matches[0], message.channel);
         await message.reply('Test notification sent!');
       } else {
@@ -685,106 +1042,105 @@ client.on('messageCreate', async (message) => {
     }
   }
   
-  // Handle !register command
-  if (message.content.toLowerCase().startsWith('!register')) {
-    const args = message.content.split(' ');
-    
-    if (args.length < 2) {
-      await message.reply('❌ Please provide a search query. Usage: `!register <nickname>`\nExample: `!register john123`');
+// Handle !listplayers command
+if (message.content.toLowerCase().startsWith('!listplayers')) {
+  try {
+    const players = await listTeamPlayers();
+
+    if (players.length === 0) {
+      await message.reply('❌ No players found for your team.');
       return;
     }
-    
-    const query = args.slice(1).join(' '); // Join all arguments after '!register'
-    
+
+    // Create embed with player list
+    const embed = new EmbedBuilder()
+      .setTitle('🎮 Team Players')
+      .setColor(0x0099ff)
+      .setTimestamp();
+
+    players.forEach((player, index) => {
+      embed.addFields({ name: `${index + 1}. ${player.nickname}`, value: `Player ID: ${player.user_id}`, inline: false });
+    });
+
+    await message.reply({ embeds: [embed] });
+    console.log(`Displayed ${players.length} team players to user ${message.author.tag}`);
+
+  } catch (err) {
+    console.error(`Error handling !listplayers command: ${err.message}`);
+    await message.reply('❌ Sorry, there was an error fetching the player list.');
+  }
+}
+
+// Handle !register command
+  if (message.content.toLowerCase() === '!register') {
     try {
-      console.log(`User ${message.author.tag} searching for FACEIT accounts: ${query}`);
-      
-      await message.reply('🔍 Searching for FACEIT accounts...');
-      
-      const accounts = await searchFaceitAccounts(query);
-      
-      if (accounts.length === 0) {
-        await message.reply(`❌ No FACEIT accounts found matching "${query}". Please try a different search term.`);
+      console.log(`User ${message.author.tag} requested team players list`);
+      const players = await listTeamPlayers();
+
+      if (players.length === 0) {
+        await message.reply('❌ No players found for your team.');
         return;
       }
-      
-      // Create embed with found accounts
+
       const embed = new EmbedBuilder()
-        .setTitle('🎮 FACEIT Account Search Results')
-        .setDescription(`Found ${accounts.length} account(s) matching "${query}":`)
-        .setColor(0xff5500) // FACEIT orange color
+        .setTitle('🎮 Team Players')
+        .setColor(0x0099ff)
         .setTimestamp();
-      
-      let description = `Found ${accounts.length} account(s) matching "${query}":\n\n`;
-      
-      accounts.forEach((account, index) => {
-        const skillLevel = account.skill_level || 'N/A';
-        const elo = account.faceit_elo || 'N/A';
-        const country = account.country || '🌐';
-        const profileUrl = `https://www.faceit.com/en/players/${account.nickname}`;
-        
-        description += `**${index + 1}.** [${account.nickname}](${profileUrl})\n`;
-        description += `🏆 Level ${skillLevel} (${elo} ELO)\n`;
-        description += `${country} ${account.country || 'Unknown Country'}\n`;
-        description += `👤 Player ID: \`${account.player_id}\`\n\n`;
+
+      players.forEach((player, index) => {
+        embed.addFields({ name: `${index + 1}. ${player.nickname}`, value: `Player ID: ${player.user_id}`, inline: false });
       });
-      
-      embed.setDescription(description);
-      
-      // Add instructions for next step
-      embed.addFields({
-        name: '📝 Next Steps',
-        value: 'To complete registration, please contact an administrator with your chosen account number.',
-        inline: false
-      });
-      
+
       await message.reply({ embeds: [embed] });
-      
-      console.log(`Successfully displayed ${accounts.length} FACEIT accounts for user ${message.author.tag}`);
-      
+      console.log(`Displayed ${players.length} team players to user ${message.author.tag}`);
+
     } catch (err) {
       console.error(`Error handling !register command: ${err.message}`);
-      await message.reply('❌ Sorry, there was an error searching for FACEIT accounts. Please try again later.');
+      await message.reply('❌ Sorry, there was an error fetching the player list.');
     }
   }
   
-  // Handle !link command to complete FACEIT registration
+// Handle !link command to register user with FACEIT
   if (message.content.toLowerCase().startsWith('!link')) {
     const args = message.content.split(' ');
+    const userId = message.author.id;
     
     if (args.length < 2) {
-      await message.reply('❌ Please provide a FACEIT player ID. Usage: `!link <player_id>`');
+      await message.reply('❌ Please provide a player nickname. Usage: `!link <nickname>`\nExample: `!link john123`');
       return;
     }
     
-    const faceitPlayerId = args[1];
-    const userId = message.author.id;
+    const nickname = args[1];
     
     try {
-      // Check if user already has a mapping
+      console.log(`User ${message.author.tag} linking to FACEIT account: ${nickname}`);
+      
+      // Check if the Discord user is already linked
       const existingMapping = getUserMappingByDiscordId(userId);
       if (existingMapping) {
-        await message.reply(`❌ You are already linked to FACEIT account **${existingMapping.faceit_nickname}**. Use \`!unlink\` first.`);
+        await message.reply(`❌ You are already linked to FACEIT account **${existingMapping.faceit_nickname}**. Use \`!unlink\` first if you want to link a different account.`);
         return;
       }
-      
-      // Check if FACEIT account is already mapped to another user
-      const duplicateMapping = isFaceitAccountMapped(faceitPlayerId);
-      if (duplicateMapping) {
-        await message.reply('❌ This FACEIT account is already registered to another Discord user.');
-        return;
-      }
-      
-      // Get FACEIT player details
-      const playerData = await makeApiRequest(`https://open.faceit.com/data/v4/players/${faceitPlayerId}`);
+
+      // Validate the FACEIT account by nickname
+      const playerData = await makeApiRequest(`https://open.faceit.com/data/v4/players`, {
+        params: { nickname }
+      });
       if (!playerData) {
-        await message.reply('❌ Invalid FACEIT player ID or player not found.');
+        await message.reply('❌ FACEIT account not found. Please make sure the nickname is correct.');
         return;
       }
-      
+
+      // Check if FACEIT account is already mapped
+      const duplicateMapping = isFaceitAccountMapped(playerData.player_id);
+      if (duplicateMapping) {
+        await message.reply('❌ This FACEIT account is already linked to another Discord user.');
+        return;
+      }
+
       // Create the mapping
-      const mapping = addUserMapping(userId, message.author.username, playerData);
-      
+      addUserMapping(userId, message.author.username, playerData);
+
       const embed = new EmbedBuilder()
         .setTitle('✅ FACEIT Account Linked Successfully!') 
         .setDescription(`Your Discord account has been linked to FACEIT account **${playerData.nickname}**`)
@@ -794,11 +1150,11 @@ client.on('messageCreate', async (message) => {
         )
         .setColor(0x00ff00)
         .setTimestamp();
-      
+
       await message.reply({ embeds: [embed] });
-      
-      console.log(`User ${message.author.tag} linked to FACEIT account ${playerData.nickname}`);
-      
+
+      console.log(`Successfully linked user ${message.author.tag} to FACEIT account ${playerData.nickname}`);
+
     } catch (err) {
       console.error(`Error handling !link command: ${err.message}`);
       await message.reply('❌ Sorry, there was an error linking your FACEIT account.');
@@ -812,7 +1168,7 @@ client.on('messageCreate', async (message) => {
     try {
       const mapping = getUserMappingByDiscordId(userId);
       if (!mapping) {
-        await message.reply('❌ You don\'t have a linked FACEIT account. Use `!register <nickname>` then `!link <player_id>`.');
+        await message.reply('❌ You don\'t have a linked FACEIT account. Use `!register` to see available players, then `!link <nickname>` to link your account.');
         return;
       }
       
@@ -857,28 +1213,203 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // Handle !help command
-  if (message.content.toLowerCase() === '!help') {
+// Handle !lookup command for admins
+  if (message.content.toLowerCase().startsWith('!lookup') && message.member?.permissions.has('ADMINISTRATOR')) {
+    const args = message.content.split(' ');
+
+    if (args.length < 2) {
+      await message.reply('❌ Please provide a search term. Usage: `!lookup <username|discord_id|faceit_nickname>`');
+      return;
+    }
+
+    const query = args.slice(1).join(' ').toLowerCase();
+    console.log(`Admin ${message.author.tag} is searching for: ${query}`);
+
+    // Search function
+    const findUserMapping = () => {
+      return Object.values(userMappings).find(mapping => {
+        return mapping.discord_username.toLowerCase() === query ||
+               mapping.discord_id === query ||
+               mapping.faceit_nickname.toLowerCase() === query;
+      });
+    };
+
+    const user = findUserMapping();
+
+    if (!user) {
+      await message.reply(`❌ No mappings found for "${query}". Please search by Discord username, Discord ID, or FACEIT nickname.`);
+      return;
+    }
+
     const embed = new EmbedBuilder()
-      .setTitle('🤖 FACEIT Bot Commands')
-      .setDescription('Available commands:')
+      .setTitle('🔍 User Lookup Result')
+      .setDescription(`**FACEIT Account:** [${user.faceit_nickname}](https://www.faceit.com/en/players/${user.faceit_nickname})`)
       .addFields(
-        { name: '!matches', value: 'Show upcoming FACEIT matches for your team' },
-        { name: '!rsvp yes/no', value: 'RSVP for the current match (registered users only)' },
-        { name: '!rsvps', value: 'View RSVP status for the current match' },
-        { name: '!status <match_id>', value: 'View RSVP status for a specific match' },
-        { name: '!register <nickname>', value: 'Search for FACEIT accounts to register' },
-        { name: '!link <player_id>', value: 'Link your Discord account to a FACEIT account' },
-        { name: '!profile', value: 'Show your linked FACEIT account information' },
-        { name: '!unlink', value: 'Unlink your FACEIT account from Discord' },
-        { name: '!lookup <user>', value: 'Look up another user\'s FACEIT account (Admin only)' },
-        { name: '!notify', value: 'Send a test match notification (Admin only)' },
-        { name: '!help', value: 'Show this help message' }
+        { name: 'Discord Username', value: user.discord_username, inline: true },
+        { name: 'Discord ID', value: user.discord_id, inline: true },
+        { name: '🏆 Skill Level', value: `${user.faceit_skill_level} (${user.faceit_elo} ELO)`, inline: true },
+        { name: '🌍 Country', value: user.country, inline: true }
       )
       .setColor(0x00ff00)
       .setTimestamp();
+
+    await message.reply({ embeds: [embed] });
+  }
+
+  // Handle !help command
+  if (message.content.toLowerCase() === '!help') {
+    const embed = new EmbedBuilder()
+      .setTitle('🤖 FACEIT Match Bot - Command Guide')
+      .setDescription('**Welcome to the FACEIT Match Bot!** This bot helps you stay updated on team matches and manage RSVPs.')
+      .addFields(
+        { 
+          name: '🚀 Quick Start (First Time Users)', 
+          value: '```\n1. !register     - View team player list\n2. !link <name>  - Link your FACEIT account\n3. !matches      - See upcoming matches\n4. !rsvp yes/no  - RSVP for matches```', 
+          inline: false 
+        },
+        { 
+          name: '📝 RSVP Commands', 
+          value: '• **`!rsvp yes`** - Attend upcoming matches\n• **`!rsvp no`** - Skip upcoming matches\n• **`!rsvp yes 1`** - RSVP for match #1 (when multiple)\n• **`!rsvps`** - View all match RSVP status\n• **`!status <match_id>`** - Check specific match RSVPs', 
+          inline: false 
+        },
+        { 
+          name: '🔍 Match & Info Commands', 
+          value: '• **`!matches`** - List all upcoming matches\n• **`!profile`** - View your linked FACEIT account\n• **`!listplayers`** - Show all team players', 
+          inline: false 
+        },
+        { 
+          name: '🔧 Account Management', 
+          value: '• **`!register`** - See available FACEIT players to link\n• **`!link <nickname>`** - Connect Discord to FACEIT account\n• **`!unlink`** - Remove FACEIT account link', 
+          inline: false 
+        },
+        { 
+          name: '🎮 How It Works', 
+          value: '**Automated Notifications:** The bot checks every 30 minutes for new matches and posts them with RSVP buttons.\n\n**Match Threads:** Each match gets its own discussion thread with live RSVP tracking.\n\n**Button RSVPs:** Click ✅ or ❌ on match posts for quick responses.', 
+          inline: false 
+        },
+        { 
+          name: '📊 Admin Commands', 
+          value: '• **`!notify`** - Send test match notification (Admin)\n• **`!lookup <user>`** - Find user mappings (Admin)', 
+          inline: false 
+        },
+        { 
+          name: '💡 Pro Tips', 
+          value: '• **Multiple Matches?** Use `!rsvp yes 1` to specify which match\n• **Quick Check:** Use match discussion threads to see who\'s attending\n• **Stay Updated:** The bot automatically cleans up old match data', 
+          inline: false 
+        }
+      )
+      .setColor(0x0099ff)
+      .setFooter({ text: 'Need more help? Ask in the server or check match discussion threads!' })
+      .setTimestamp();
     
     await message.reply({ embeds: [embed] });
+  }
+});
+
+// Handle button interactions
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isButton()) return;
+  
+  const userId = interaction.user.id;
+  console.log(`Button interaction from ${interaction.user.tag}: ${interaction.customId}`);
+  
+  try {
+    // Parse button custom ID
+    const [action, response, matchId] = interaction.customId.split('_');
+    
+    if (action !== 'rsvp') {
+      await interaction.reply({ content: '❌ Unknown button action.', ephemeral: true });
+      return;
+    }
+    
+    // Handle viewing RSVP status
+    if (response === 'status') {
+      const matchRsvps = getRsvpForMatch(matchId);
+      
+      if (Object.keys(matchRsvps).length === 0) {
+        await interaction.reply({ content: '📝 No RSVPs yet for this match.', ephemeral: true });
+        return;
+      }
+      
+      const yesRsvps = [];
+      const noRsvps = [];
+      
+      for (const [discordId, rsvpData] of Object.entries(matchRsvps)) {
+        const entry = `${rsvpData.faceit_nickname}`;
+        if (rsvpData.response === 'yes') {
+          yesRsvps.push(entry);
+        } else {
+          noRsvps.push(entry);
+        }
+      }
+      
+      const embed = new EmbedBuilder()
+        .setTitle('📝 Match RSVP Status')
+        .setDescription(`RSVP status for match ID: \`${matchId}\``)
+        .setColor(0x0099ff)
+        .setTimestamp();
+      
+      if (yesRsvps.length > 0) {
+        embed.addFields({
+          name: '✅ Attending',
+          value: yesRsvps.join('\n'),
+          inline: true
+        });
+      }
+      
+      if (noRsvps.length > 0) {
+        embed.addFields({
+          name: '❌ Not Attending',
+          value: noRsvps.join('\n'),
+          inline: true
+        });
+      }
+      
+      embed.addFields({
+        name: 'Total Responses',
+        value: `${Object.keys(matchRsvps).length} player(s)`,
+        inline: false
+      });
+      
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      return;
+    }
+    
+    // Handle RSVP yes/no responses
+    if (response !== 'yes' && response !== 'no') {
+      await interaction.reply({ content: '❌ Invalid RSVP response.', ephemeral: true });
+      return;
+    }
+    
+    // Check if user is registered
+    const userMapping = getUserMappingByDiscordId(userId);
+    if (!userMapping) {
+      await interaction.reply({ 
+        content: '❌ You must be linked to a FACEIT account to RSVP. Use `!register` to see available players, then `!link <nickname>` to link your account.', 
+        ephemeral: true 
+      });
+      return;
+    }
+    
+    // Check if user already has an RSVP for this match
+    const existingRsvp = getUserRsvp(matchId, userId);
+    
+    // Add/update RSVP
+    addRsvp(matchId, userId, response, userMapping.faceit_nickname);
+    
+    const responseEmoji = response === 'yes' ? '✅' : '❌';
+    const actionText = existingRsvp ? 'updated' : 'recorded';
+    
+    await interaction.reply({ 
+      content: `${responseEmoji} Your RSVP has been ${actionText}! **${userMapping.faceit_nickname}** - ${response.toUpperCase()}`, 
+      ephemeral: true 
+    });
+    
+    console.log(`RSVP ${actionText} via button: ${interaction.user.tag} (${userMapping.faceit_nickname}) -> ${response} for match ${matchId}`);
+    
+  } catch (err) {
+    console.error(`Error handling button interaction: ${err.message}`);
+    await interaction.reply({ content: '❌ Sorry, there was an error processing your RSVP.', ephemeral: true });
   }
 });
 
@@ -913,12 +1444,42 @@ cron.schedule('*/30 * * * *', () => {
   }
 });
 
+// Schedule cleanup every 6 hours to remove old data
+cron.schedule('0 */6 * * *', () => {
+  console.log('Running scheduled cleanup...');
+  if (client.isReady()) {
+    cleanupOldRsvpData();
+  } else {
+    console.log('Discord client not ready, skipping cleanup');
+  }
+});
+
 // Handle graceful shutdown
 process.on('SIGTERM', () => {
   console.log('SIGTERM received, shutting down...');
   client.destroy();
   server.close();
   process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  console.log('SIGINT received, shutting down...');
+  client.destroy();
+  server.close();
+  process.exit(0);
+});
+
+// Handle uncaught exceptions and unhandled promise rejections
+process.on('uncaughtException', (error) => {
+  console.error('Uncaught Exception:', error.message);
+  console.error(error.stack);
+  // Don't exit immediately, log the error but keep the bot running
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('Unhandled Rejection at:', promise);
+  console.error('Reason:', reason);
+  // Don't exit immediately, log the error but keep the bot running
 });
 
 // Login to Discord
