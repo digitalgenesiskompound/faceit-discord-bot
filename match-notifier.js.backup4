@@ -1,0 +1,512 @@
+require('dotenv').config();
+const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
+const axios = require('axios');
+const cron = require('node-cron');
+const fs = require('fs');
+const http = require('http');
+
+// Configuration
+const FACEIT_API_KEY = process.env.FACEIT_API_KEY;
+const DISCORD_BOT_TOKEN = process.env.DISCORD_BOT_TOKEN;
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID; // Channel to send notifications
+const TEAM_ID = process.env.TEAM_ID || 'cfbb8afd-6ab6-44a9-bf07-3de4f86889af';
+const COMPETITION_ID = 'f5aec3e5-57e5-4dde-a9d5-4e630766bc14';
+
+// File paths
+const DATA_DIR = '/app/data';
+const PROCESSED_MATCHES_FILE = `${DATA_DIR}/processed_matches.json`;
+
+// Discord client setup
+const client = new Client({ 
+  intents: [
+    GatewayIntentBits.Guilds, 
+    GatewayIntentBits.GuildMessages, 
+    GatewayIntentBits.MessageContent
+  ] 
+});
+
+// Create data directory if it doesn't exist
+if (!fs.existsSync(DATA_DIR)) {
+  try {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  } catch (err) {
+    console.error(`Error creating data directory: ${err.message}`);
+  }
+}
+
+// Load processed matches
+let processedMatches = [];
+try {
+  if (fs.existsSync(PROCESSED_MATCHES_FILE)) {
+    processedMatches = JSON.parse(fs.readFileSync(PROCESSED_MATCHES_FILE, 'utf8'));
+  }
+} catch (err) {
+  console.error(`Error loading processed matches: ${err.message}`);
+}
+
+// Format date for multiple time zones
+function formatMatchTime(timestamp) {
+  if (!timestamp) return 'TBD';
+  
+  const date = new Date(timestamp * 1000);
+  
+  // Format for Pacific Time
+  const pacificTime = date.toLocaleString('en-US', { 
+    timeZone: 'America/Los_Angeles',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
+  
+  // Format for Mountain Time
+  const mountainTime = date.toLocaleString('en-US', { 
+    timeZone: 'America/Denver',
+    weekday: 'short',
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+    hour12: true
+  });
+  
+  return {
+    pacific: `${pacificTime} PDT`,
+    mountain: `${mountainTime} MDT`
+  };
+}
+
+// API request function
+async function makeApiRequest(url, options = {}) {
+  try {
+    const headers = {
+      'Authorization': `Bearer ${FACEIT_API_KEY}`,
+      'Accept': 'application/json',
+      ...options.headers
+    };
+    
+    const response = await axios.get(url, { ...options, headers });
+    return response.data;
+  } catch (error) {
+    console.error(`API Error (${url}): ${error.message}`);
+    if (error.response) {
+      console.error(`Status: ${error.response.status}`);
+    }
+    return null;
+  }
+}
+
+// Save processed matches
+function saveProcessedMatches() {
+  try {
+    fs.writeFileSync(PROCESSED_MATCHES_FILE, JSON.stringify(processedMatches));
+  } catch (err) {
+    console.error(`Error saving processed matches: ${err.message}`);
+  }
+}
+
+// Mark a match as processed
+function markMatchAsProcessed(matchId) {
+  if (!processedMatches.includes(matchId)) {
+    processedMatches.push(matchId);
+    saveProcessedMatches();
+  }
+}
+
+// Send notification for a match via Discord bot
+async function sendMatchNotification(match, channel = null) {
+  try {
+    if (!match || !match.teams || !match.teams.faction1 || !match.teams.faction2) {
+      console.error('Invalid match data for notification');
+      return;
+    }
+    
+    const faction1 = match.teams.faction1.name;
+    const faction2 = match.teams.faction2.name;
+    const matchTimes = formatMatchTime(match.scheduled_at);
+    const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
+    
+    const embed = new EmbedBuilder()
+      .setTitle(`🎮 Upcoming FACEIT Match: ${faction1} vs ${faction2}`)
+      .setDescription(`**Times:**\n${matchTimes.pacific}\n${matchTimes.mountain}\n\n**Competition:** ${match.competition_name || 'ESEA Season'}`)
+      .setColor(0x00ff00)
+      .addFields({
+        name: 'Match Details',
+        value: `[Click here to view match](${matchUrl})`
+      })
+      .setTimestamp();
+    
+    console.log(`Sending notification for match: ${match.match_id} (${faction1} vs ${faction2})`);
+    
+    // Send to specified channel or default notification channel
+    const targetChannel = channel || client.channels.cache.get(DISCORD_CHANNEL_ID);
+    
+    if (targetChannel) {
+      await targetChannel.send({
+        content: "New match scheduled!",
+        embeds: [embed]
+      });
+      
+      console.log('Notification sent successfully!');
+      
+      // Only mark as processed if this was an automatic notification
+      if (!channel) {
+        markMatchAsProcessed(match.match_id);
+      }
+    } else {
+      console.error('Could not find target channel for notification');
+    }
+    
+  } catch (err) {
+    console.error(`Error sending notification: ${err.message}`);
+  }
+}
+
+// Get upcoming matches
+async function getUpcomingMatches() {
+  const matches = [];
+  const matchIds = new Set();
+  
+  // Method 1: Check championship matches
+  try {
+    console.log('Getting matches from championship...');
+    const champData = await makeApiRequest(`https://open.faceit.com/data/v4/championships/${COMPETITION_ID}/matches`, {
+      params: { limit: 100 }
+    });
+    
+    if (champData && champData.items) {
+      console.log(`Found ${champData.items.length} championship matches total`);
+      
+      // Filter for team matches
+      const teamMatches = champData.items.filter(match => {
+        if (!match.teams || !match.teams.faction1 || !match.teams.faction2) return false;
+        
+        const faction1Id = match.teams.faction1.faction_id;
+        const faction2Id = match.teams.faction2.faction_id;
+        
+        return (faction1Id === TEAM_ID || faction2Id === TEAM_ID) && 
+               !match.finished_at && 
+               match.status !== 'FINISHED';
+      });
+      
+      console.log(`Found ${teamMatches.length} upcoming team matches in championship`);
+      
+      // Add to matches list
+      for (const match of teamMatches) {
+        if (!matchIds.has(match.match_id)) {
+          matchIds.add(match.match_id);
+          matches.push(match);
+        }
+      }
+    }
+  } catch (err) {
+    console.error(`Error getting championship matches: ${err.message}`);
+  }
+  
+  // Try player history approach if we didn't find any matches
+  if (matches.length === 0) {
+        console.log(`No matches found, sending no matches message`);
+    try {
+      console.log('Trying player history approach...');
+      
+      // First get team details to find players
+      const teamData = await makeApiRequest(`https://open.faceit.com/data/v4/teams/${TEAM_ID}`);
+      
+      if (teamData && teamData.members && teamData.members.length > 0) {
+        // Check match history for first player
+        const playerId = teamData.members[0].user_id;
+        console.log(`Checking match history for player: ${teamData.members[0].nickname}`);
+        
+        const playerHistory = await makeApiRequest(`https://open.faceit.com/data/v4/players/${playerId}/history`, {
+          params: { game: 'cs2', limit: 20 }
+        });
+        
+        if (playerHistory && playerHistory.items) {
+          // Find upcoming matches
+          const upcomingMatches = playerHistory.items.filter(match => 
+            !match.finished_at && 
+            match.status !== 'FINISHED' && 
+            match.status !== 'CANCELLED'
+          );
+          
+          // Check each match to see if it involves the team
+          for (const match of upcomingMatches) {
+            if (!matchIds.has(match.match_id)) {
+              const fullMatch = await makeApiRequest(`https://open.faceit.com/data/v4/matches/${match.match_id}`);
+              
+              if (fullMatch && fullMatch.teams) {
+                const faction1Id = fullMatch.teams.faction1?.faction_id;
+                const faction2Id = fullMatch.teams.faction2?.faction_id;
+                
+                if (faction1Id === TEAM_ID || faction2Id === TEAM_ID) {
+                  matchIds.add(match.match_id);
+                  matches.push(fullMatch);
+                }
+              }
+            }
+          }
+        }
+      }
+    } catch (err) {
+      console.error(`Error with player history approach: ${err.message}`);
+    }
+  }
+  
+  console.log(`Total upcoming matches found: ${matches.length}`);
+  return matches;
+}
+
+// Main check function
+async function checkMatches() {
+  try {
+    console.log('Checking for upcoming matches...');
+    
+    // Get all upcoming matches
+    const matches = await getUpcomingMatches();
+      console.log(`getUpcomingMatches() returned ${matches.length} matches`);
+    
+    // Check if we have any new matches to notify about
+    const newMatches = matches.filter(match => !processedMatches.includes(match.match_id));
+    
+    console.log(`New matches to notify about: ${newMatches.length}`);
+    
+    // Send individual notifications for new matches
+    for (const match of newMatches) {
+      await sendMatchNotification(match);
+    }
+    
+  } catch (err) {
+    console.error(`Error in check function: ${err.message}`);
+  }
+}
+
+// Discord bot event handlers
+client.once('ready', () => {
+  console.log(`Discord bot logged in as ${client.user.tag}!`);
+  
+  // Initial check on startup
+  console.log('FACEIT Match Notifier (BETA) starting...');
+  checkMatches();
+});
+
+// Command handling
+client.on('messageCreate', async (message) => {
+  // Ignore messages from bots
+  console.log(`Received message: ${message.content} from ${message.author.tag}`);
+  if (message.author.bot) return;
+  
+  // Handle !matches command
+  if (message.content.toLowerCase() === '!matches') {
+    try {
+      console.log(`User ${message.author.tag} requested matches list`);
+      console.log(`About to call getUpcomingMatches()`);
+      
+      const matches = await getUpcomingMatches();
+      console.log(`getUpcomingMatches() returned ${matches.length} matches`);
+      
+      if (matches.length === 0) {
+        console.log(`No matches found, sending no matches message`);
+        await message.reply('No upcoming matches found for your team.');
+        return;
+      }
+      
+      // Create embed with match list
+      const embed = new EmbedBuilder()
+        .setTitle('🎮 Upcoming FACEIT Matches')
+        .setColor(0x0099ff)
+        .setTimestamp();
+      
+      let description = '';
+      
+      matches.forEach((match, index) => {
+        const faction1 = match.teams.faction1?.name || 'TBD';
+        const faction2 = match.teams.faction2?.name || 'TBD';
+        const matchTimes = formatMatchTime(match.scheduled_at);
+        const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
+        
+        description += `**${index + 1}.** ${faction1} vs ${faction2}\n`;
+        description += `📅 ${matchTimes.pacific} / ${matchTimes.mountain}\n`;
+        description += `🔗 [View Match](${matchUrl})\n\n`;
+      });
+      
+      embed.setDescription(description);
+      
+      await message.reply({ embeds: [embed] });
+      
+    } catch (err) {
+      console.error(`Error handling !matches command: ${err.message}`);
+      await message.reply('Sorry, there was an error fetching match information.');
+    }
+  }
+  
+  // Handle !notify command to send a test notification
+  if (message.content.toLowerCase() === '!notify' && message.member?.permissions.has('ADMINISTRATOR')) {
+    try {
+      const matches = await getUpcomingMatches();
+      console.log(`getUpcomingMatches() returned ${matches.length} matches`);
+      if (matches.length > 0) {
+        await sendMatchNotification(matches[0], message.channel);
+        await message.reply('Test notification sent!');
+      } else {
+        await message.reply('No matches available for test notification.');
+      }
+    } catch (err) {
+      console.error(`Error handling !notify command: ${err.message}`);
+      await message.reply('Sorry, there was an error sending the test notification.');
+    }
+  }
+  
+
+  
+  // Handle !register command
+  if (message.content.toLowerCase().startsWith('!register')) {
+    const args = message.content.split(' ');
+    
+    if (args.length < 2) {
+      await message.reply('❌ Please provide a search query. Usage: `!register <nickname>`\nExample: `!register john123`');
+      return;
+    }
+    
+    const query = args.slice(1).join(' '); // Join all arguments after '!register'
+    
+    try {
+      console.log(`User ${message.author.tag} searching for FACEIT accounts: ${query}`);
+      
+      await message.reply('🔍 Searching for FACEIT accounts...');
+      
+      const accounts = await searchFaceitAccounts(query);
+      
+      if (accounts.length === 0) {
+        await message.reply(`❌ No FACEIT accounts found matching "${query}". Please try a different search term.`);
+        return;
+      }
+      
+      // Create embed with found accounts
+      const embed = new EmbedBuilder()
+        .setTitle('🎮 FACEIT Account Search Results')
+        .setDescription(`Found ${accounts.length} account(s) matching "${query}":`)
+        .setColor(0xff5500) // FACEIT orange color
+        .setTimestamp();
+      
+      let description = `Found ${accounts.length} account(s) matching "${query}":\n\n`;
+      
+      accounts.forEach((account, index) => {
+        const skillLevel = account.skill_level || 'N/A';
+        const elo = account.faceit_elo || 'N/A';
+        const country = account.country || '🌐';
+        const profileUrl = `https://www.faceit.com/en/players/${account.nickname}`;
+        
+        description += `**${index + 1}.** [${account.nickname}](${profileUrl})\n`;
+        description += `🏆 Level ${skillLevel} (${elo} ELO)\n`;
+        description += `${country} ${account.country || 'Unknown Country'}\n`;
+        description += `👤 Player ID: \`${account.player_id}\`\n\n`;
+      });
+      
+      embed.setDescription(description);
+      
+      // Add instructions for next step
+      embed.addFields({
+        name: '📝 Next Steps',
+        value: 'To complete registration, please contact an administrator with your chosen account number.',
+        inline: false
+      });
+      
+      await message.reply({ embeds: [embed] });
+      
+      console.log(`Successfully displayed ${accounts.length} FACEIT accounts for user ${message.author.tag}`);
+      
+    } catch (err) {
+      console.error(`Error handling !register command: ${err.message}`);
+      await message.reply('❌ Sorry, there was an error searching for FACEIT accounts. Please try again later.');
+    }
+  }
+  // Handle !help command
+  if (message.content.toLowerCase() === '!help') {
+    const embed = new EmbedBuilder()
+      .setTitle('🤖 FACEIT Bot Commands')
+      .setDescription('Available commands:')
+      .addFields(
+        { name: '!matches', value: 'Show upcoming FACEIT matches for your team' },
+        { name: '!register <nickname>', value: 'Search for FACEIT accounts to register' },
+        { name: '!notify', value: 'Send a test match notification (Admin only)' },
+        { name: '!help', value: 'Show this help message' }
+      )
+      .setColor(0x00ff00)
+      .setTimestamp();
+    
+    await message.reply({ embeds: [embed] });
+  }
+});
+
+// Health check server
+const server = http.createServer((req, res) => {
+  if (req.url === '/health') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ 
+      status: 'ok', 
+      discord_ready: client.isReady(),
+      uptime: process.uptime()
+    }));
+    return;
+  }
+  
+  res.writeHead(404);
+  res.end();
+});
+
+// Start health check server
+server.listen(8080, () => {
+  console.log('Health check server running on port 8080');
+});
+
+// Schedule to run every 30 minutes
+cron.schedule('*/30 * * * *', () => {
+  console.log('Running scheduled check...');
+  if (client.isReady()) {
+    checkMatches();
+  } else {
+    console.log('Discord client not ready, skipping check');
+  }
+});
+
+// Handle graceful shutdown
+process.on('SIGTERM', () => {
+  console.log('SIGTERM received, shutting down...');
+  client.destroy();
+  server.close();
+  process.exit(0);
+});
+
+// Login to Discord
+client.login(DISCORD_BOT_TOKEN).catch(err => {
+  console.error('Failed to login to Discord:', err);
+  process.exit(1);
+});
+
+// Function to search for FACEIT accounts
+async function searchFaceitAccounts(query) {
+  try {
+    console.log(`Searching for FACEIT accounts with query: ${query}`);
+    
+    // FACEIT API endpoint for searching players
+    const response = await makeApiRequest(`https://open.faceit.com/data/v4/search/players`, {
+      params: {
+        nickname: query,
+        limit: 10  // Limit to 10 results for better Discord display
+      }
+    });
+    
+    if (response && response.items && response.items.length > 0) {
+      console.log(`Found ${response.items.length} FACEIT accounts`);
+      return response.items;
+    } else {
+      console.log('No FACEIT accounts found');
+      return [];
+    }
+  } catch (error) {
+    console.error(`Error searching FACEIT accounts: ${error.message}`);
+    return [];
+  }
+}
