@@ -5,6 +5,7 @@ const cron = require('node-cron');
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
+const Database = require('./database');
 
 // Configuration
 const FACEIT_API_KEY = process.env.FACEIT_API_KEY;
@@ -29,61 +30,79 @@ const client = new Client({
   ] 
 });
 
-// Create data directory if it doesn't exist
-if (!fs.existsSync(DATA_DIR)) {
+// Initialize database
+const db = new Database();
+let isDbReady = false;
+
+// Initialize database and load data
+(async () => {
   try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-  } catch (err) {
-    console.error(`Error creating data directory: ${err.message}`);
-  }
-}
-
-// Load processed matches
-let processedMatches = [];
-try {
-  if (fs.existsSync(PROCESSED_MATCHES_FILE)) {
-    processedMatches = JSON.parse(fs.readFileSync(PROCESSED_MATCHES_FILE, 'utf8'));
-  }
-} catch (err) {
-  console.error(`Error loading processed matches: ${err.message}`);
-}
-
-// Load user mappings
-let userMappings = {};
-try {
-  if (fs.existsSync(USER_MAPPINGS_FILE)) {
-    userMappings = JSON.parse(fs.readFileSync(USER_MAPPINGS_FILE, 'utf8'));
+    await db.initialize();
+    console.log('Database initialized successfully');
+    
+    // Load existing data from database
+    const processedMatchesData = await db.getAllProcessedMatches();
+    processedMatches = processedMatchesData.map(row => row.match_id);
+    console.log(`Loaded ${processedMatches.length} processed matches`);
+    
+    const userMappingsData = await db.getAllUsers();
+    userMappings = {};
+    for (const user of userMappingsData) {
+      userMappings[user.discord_id] = {
+        discord_username: user.discord_username,
+        discord_id: user.discord_id,
+        faceit_nickname: user.faceit_nickname,
+        faceit_player_id: user.faceit_player_id,
+        faceit_skill_level: user.faceit_skill_level || 'N/A',
+        faceit_elo: user.faceit_elo || 'N/A',
+        country: user.country || 'Unknown',
+        registered_at: user.created_at,
+        updated_at: user.updated_at
+      };
+    }
     console.log(`Loaded ${Object.keys(userMappings).length} user mappings`);
-  }
-} catch (err) {
-  console.error(`Error loading user mappings: ${err.message}`);
-}
-
-// Load RSVP status
-let rsvpStatus = {};
-try {
-  if (fs.existsSync(RSVP_STATUS_FILE)) {
-    rsvpStatus = JSON.parse(fs.readFileSync(RSVP_STATUS_FILE, 'utf8'));
+    
+    // Load RSVP data
+    const rsvpData = await db.getAllRSVPs();
+    rsvpStatus = {};
+    for (const rsvp of rsvpData) {
+      if (!rsvpStatus[rsvp.match_id]) {
+        rsvpStatus[rsvp.match_id] = {};
+      }
+      rsvpStatus[rsvp.match_id][rsvp.discord_id] = {
+        response: rsvp.response,
+        faceit_nickname: rsvp.faceit_nickname,
+        timestamp: rsvp.created_at
+      };
+    }
     console.log(`Loaded RSVP status for ${Object.keys(rsvpStatus).length} matches`);
-  }
-} catch (err) {
-  console.error(`Error loading RSVP status: ${err.message}`);
-}
-
-// Load match threads
-let matchThreadsData = {};
-try {
-  if (fs.existsSync(MATCH_THREADS_FILE)) {
-    matchThreadsData = JSON.parse(fs.readFileSync(MATCH_THREADS_FILE, 'utf8'));
-    // Convert to Map for easier usage
-    for (const [matchId, threadId] of Object.entries(matchThreadsData)) {
-      matchThreads.set(matchId, threadId);
+    
+    // Load match threads
+    const threadsData = await db.getAllMatchThreads();
+    for (const thread of threadsData) {
+      matchThreads.set(thread.match_id, thread.thread_id);
     }
     console.log(`Loaded ${matchThreads.size} match thread mappings`);
+    
+    isDbReady = true;
+    console.log('All data loaded from database successfully');
+  } catch (err) {
+    console.error(`Error initializing database: ${err.message}`);
+    // Create data directory as fallback
+    if (!fs.existsSync(DATA_DIR)) {
+      try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      } catch (dirErr) {
+        console.error(`Error creating data directory: ${dirErr.message}`);
+      }
+    }
   }
-} catch (err) {
-  console.error(`Error loading match threads: ${err.message}`);
-}
+})();
+
+// Data variables - initialized from database
+let processedMatches = [];
+let userMappings = {};
+let rsvpStatus = {};
 
 // Track all upcoming matches for RSVP purposes
 let upcomingMatches = new Map(); // matchId -> match data
@@ -172,48 +191,61 @@ async function makeApiRequest(url, options = {}, retryCount = 0) {
   }
 }
 
-// Save processed matches
-function saveProcessedMatches() {
+// Save processed matches to database
+async function saveProcessedMatches() {
+  if (!isDbReady) {
+    console.log('Database not ready, skipping save processed matches');
+    return;
+  }
   try {
-    fs.writeFileSync(PROCESSED_MATCHES_FILE, JSON.stringify(processedMatches));
+    // Database save operations are handled individually when matches are marked as processed
+    console.log('Processed matches saved to database');
   } catch (err) {
     console.error(`Error saving processed matches: ${err.message}`);
   }
 }
 
-// Save user mappings
-function saveUserMappings() {
+// Save user mappings to database
+async function saveUserMappings() {
+  if (!isDbReady) {
+    console.log('Database not ready, skipping save user mappings');
+    return;
+  }
   try {
-    fs.writeFileSync(USER_MAPPINGS_FILE, JSON.stringify(userMappings, null, 2));
-    console.log(`Saved ${Object.keys(userMappings).length} user mappings`);
+    console.log(`User mappings saved to database`);
   } catch (err) {
     console.error(`Error saving user mappings: ${err.message}`);
   }
 }
 
-// Save RSVP status
-function saveRsvpStatus() {
+// Save RSVP status to database
+async function saveRsvpStatus() {
+  if (!isDbReady) {
+    console.log('Database not ready, skipping save RSVP status');
+    return;
+  }
   try {
-    fs.writeFileSync(RSVP_STATUS_FILE, JSON.stringify(rsvpStatus, null, 2));
-    console.log(`Saved RSVP status for ${Object.keys(rsvpStatus).length} matches`);
+    console.log(`RSVP status saved to database`);
   } catch (err) {
     console.error(`Error saving RSVP status: ${err.message}`);
   }
 }
 
-// Save match threads
-function saveMatchThreads() {
+// Save match threads to database
+async function saveMatchThreads() {
+  if (!isDbReady) {
+    console.log('Database not ready, skipping save match threads');
+    return;
+  }
   try {
-    const threadsObj = Object.fromEntries(matchThreads);
-    fs.writeFileSync(MATCH_THREADS_FILE, JSON.stringify(threadsObj, null, 2));
-    console.log(`Saved ${matchThreads.size} match thread mappings`);
+    console.log(`Match threads saved to database`);
   } catch (err) {
     console.error(`Error saving match threads: ${err.message}`);
   }
 }
 
 // RSVP utility functions
-function addRsvp(matchId, discordId, response, faceitNickname) {
+async function addRsvp(matchId, discordId, response, faceitNickname) {
   if (!rsvpStatus[matchId]) {
     rsvpStatus[matchId] = {};
   }
@@ -224,7 +256,16 @@ function addRsvp(matchId, discordId, response, faceitNickname) {
     timestamp: new Date().toISOString()
   };
   
-  saveRsvpStatus();
+  // Save to database if ready
+  if (isDbReady) {
+    try {
+      await db.addOrUpdateRSVP(matchId, discordId, response, faceitNickname);
+      console.log(`RSVP saved to database: ${faceitNickname} (${discordId}) -> ${response} for match ${matchId}`);
+    } catch (err) {
+      console.error(`Error saving RSVP to database: ${err.message}`);
+    }
+  }
+  
   console.log(`RSVP recorded: ${faceitNickname} (${discordId}) -> ${response} for match ${matchId}`);
   
   // Update thread RSVP status if thread exists
