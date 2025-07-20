@@ -875,7 +875,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
   }
 
   /**
-   * Lock finished match threads that are older than 72 hours
+   * Lock finished match threads that are older than 72 hours based on match finish time
    */
   async lockOldFinishedMatchThreads() {
     try {
@@ -908,21 +908,30 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
             continue;
           }
           
-          // Check thread creation time (use created timestamp)
-          const threadCreationTime = thread.createdTimestamp;
+          // Get match data to check the actual match finish time
+          const matchData = await this.db.db.getMatch(threadRecord.match_id);
           
-          if (threadCreationTime && threadCreationTime < cutoffTime) {
-            console.log(`Locking old finished match thread: ${thread.name}`);
+          if (!matchData) {
+            console.log(`No match data found for thread ${threadRecord.thread_id}, skipping`);
+            continue;
+          }
+          
+          // Use match finish time (finished_at) instead of thread creation time
+          // finished_at is stored as unix timestamp in seconds, convert to milliseconds
+          const matchFinishTime = matchData.finished_at ? matchData.finished_at * 1000 : null;
+          
+          if (matchFinishTime && matchFinishTime < cutoffTime) {
+            console.log(`Locking old finished match thread: ${thread.name} (match finished ${new Date(matchFinishTime).toLocaleString()})`);
             
             // Lock the thread
-            await thread.setLocked(true, 'Auto-locking finished match thread after 72 hours');
+            await thread.setLocked(true, 'Auto-locking finished match thread after 72 hours since match completion');
             
             // Optionally send a final message before locking
             await thread.send({
               embeds: [
                 new EmbedBuilder()
                   .setTitle('🔒 Thread Locked')
-                  .setDescription('This match thread has been automatically locked after 72 hours. The match discussion is now archived for historical reference.')
+                  .setDescription('This match thread has been automatically locked 72 hours after the match ended. The match discussion is now archived for historical reference.')
                   .setColor(0x808080)
                   .setTimestamp()
               ]
@@ -932,6 +941,8 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
             
             // Small delay to avoid rate limiting
             await new Promise(resolve => setTimeout(resolve, 1000));
+          } else if (!matchFinishTime) {
+            console.log(`Match ${threadRecord.match_id} has no finish time recorded, skipping thread lock`);
           }
         } catch (threadErr) {
           console.error(`Error processing thread ${threadRecord.thread_id}: ${threadErr.message}`);
