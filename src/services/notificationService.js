@@ -91,10 +91,10 @@ class NotificationService {
    */
   async checkFaceitApiHealth() {
     try {
-      // Make a simple API request to check health
+      // Make a simple API request to check health using the team endpoint
       const startTime = Date.now();
       await errorHandler.httpRequestWithRetry(
-        () => require('axios').get(`https://open.faceit.com/data/v4/players/${config.faceit.teamId}`, {
+        () => require('axios').get(`https://open.faceit.com/data/v4/teams/${config.faceit.teamId}`, {
           headers: { 'Authorization': `Bearer ${config.faceit.apiKey}` },
           timeout: 10000
         }),
@@ -193,7 +193,7 @@ class NotificationService {
       await this.sendSystemHealthNotification('critical', criticalIssues);
     }
 
-    if (warnings.length > 0) {
+if (warnings.length > 0) {
       await this.sendSystemHealthNotification('warning', warnings);
     }
   }
@@ -210,18 +210,24 @@ class NotificationService {
     }
 
     try {
-      const embed = this.createHealthNotificationEmbed(severity, issues);
-      const channel = this.client.channels.cache.get(config.discord.channelId);
+const embed = this.createHealthNotificationEmbed(severity, issues);
+const adminUser = await this.client.users.fetch(config.adminDiscordId);
 
-      if (channel) {
-        await channel.send({ embeds: [embed] });
-        this.setCooldown(notificationKey, severity === 'critical' ? 30 * 60 * 1000 : 60 * 60 * 1000); // 30 min for critical, 1 hour for warnings
-        
-        errorHandler.logger.warn(`Sent ${severity} health notification`, { 
-          issueCount: issues.length,
-          issues: issues.map(i => `${i.component}: ${i.issue}`)
-        });
-      }
+if (adminUser) {
+  await adminUser.send({ embeds: [embed] });
+  this.setCooldown(notificationKey, 30 * 60 * 1000); // 30 min for critical or warning
+
+  errorHandler.logger.warn(`Sent ${severity} health notification via DM to admin`, { 
+    issueCount: issues.length,
+    issues: issues.map(i => `${i.component}: ${i.issue}`)
+  });
+} else {
+  errorHandler.logger.error('Failed to send health notification via DM (admin not found)', {
+    severity,
+    issueCount: issues.length,
+    issues: issues.map(i => `${i.component}: ${i.issue}`)
+  });
+}
     } catch (error) {
       errorHandler.logger.error('Failed to send health notification', { 
         error: error.message,
@@ -232,7 +238,7 @@ class NotificationService {
   }
 
   /**
-   * Create health notification embed
+   * Create enhanced health notification embed with comprehensive diagnostics for admin DMs
    */
   createHealthNotificationEmbed(severity, issues) {
     const embed = new EmbedBuilder()
@@ -240,38 +246,113 @@ class NotificationService {
 
     if (severity === 'critical') {
       embed
-        .setTitle('🚨 Critical System Issues Detected')
-        .setDescription('The bot has detected critical issues that may affect functionality. Please check the system immediately.')
+        .setTitle('🚨 Critical System Issue')
+        .setDescription(`Bot has critical issues affecting functionality. Immediate attention required.`)
         .setColor(0xff0000); // Red
     } else {
       embed
-        .setTitle('⚠️ System Health Warning')
-        .setDescription('The bot has detected some issues that may impact performance.')
+        .setTitle('⚠️ System Warning')
+        .setDescription(`Bot detected issues that may impact performance. Monitoring recommended.`)
         .setColor(0xffa500); // Orange
     }
 
-    // Add each issue as a field
+    // Add each issue with comprehensive diagnostic information
     issues.forEach((issue, index) => {
+      let diagnosticInfo = `**Issue:** ${issue.issue}\n`;
+      
+      // Add HTTP status code if available
+      if (issue.httpStatus) {
+        diagnosticInfo += `**HTTP Status:** ${issue.httpStatus}\n`;
+      }
+      
+      // Add API URL if available
+      if (issue.apiUrl) {
+        diagnosticInfo += `**API URL:** \`${issue.apiUrl}\`\n`;
+      }
+      
+      // Add response body/text if available
+      if (issue.responseBody) {
+        const responsePreview = issue.responseBody.length > 150 
+          ? issue.responseBody.substring(0, 150) + '...'
+          : issue.responseBody;
+        diagnosticInfo += `**Response:** \`${responsePreview}\`\n`;
+      }
+      
+      // Add error details
+      if (issue.details) {
+        const errorPreview = issue.details.length > 200 
+          ? issue.details.substring(0, 200) + '...'
+          : issue.details;
+        diagnosticInfo += `**Error:** ${errorPreview}\n`;
+      }
+      
+      // Add context information if available
+      if (issue.context) {
+        const contextInfo = typeof issue.context === 'object' 
+          ? JSON.stringify(issue.context, null, 0).substring(0, 100)
+          : issue.context.toString().substring(0, 100);
+        diagnosticInfo += `**Context:** \`${contextInfo}\`\n`;
+      }
+      
+      // Add retry information if available
+      if (issue.retryCount !== undefined) {
+        diagnosticInfo += `**Retry Count:** ${issue.retryCount}\n`;
+      }
+      
+      // Add timestamp of the issue
+      if (issue.timestamp) {
+        diagnosticInfo += `**Occurred:** ${new Date(issue.timestamp).toLocaleString()}\n`;
+      }
+      
       embed.addFields({
-        name: `${issue.component}`,
-        value: `**Issue:** ${issue.issue}\n**Details:** ${issue.details}`,
+        name: `${issue.component} ${index + 1}`,
+        value: diagnosticInfo.trim(),
         inline: false
       });
     });
 
+    // Add comprehensive system diagnostics
+    const memUsage = Math.round(process.memoryUsage().heapUsed / 1024 / 1024);
+    const memTotal = Math.round(process.memoryUsage().rss / 1024 / 1024);
+    const uptime = Math.floor(process.uptime() / 60);
+    const nodeVersion = process.version;
+    const platform = process.platform;
+    
+    let systemDiagnostics = `**Memory Usage:** ${memUsage}MB / ${memTotal}MB RSS\n`;
+    systemDiagnostics += `**Uptime:** ${uptime} minutes\n`;
+    systemDiagnostics += `**Node.js:** ${nodeVersion}\n`;
+    systemDiagnostics += `**Platform:** ${platform}\n`;
+    systemDiagnostics += `**Bot Status:** ${this.client.isReady() ? 'Connected' : 'Disconnected'}\n`;
+    systemDiagnostics += `**Discord WS Ping:** ${this.client.ws.ping}ms\n`;
+    systemDiagnostics += `**Process ID:** ${process.pid}\n`;
+    systemDiagnostics += `**Timestamp:** ${new Date().toISOString()}`;
+    
     embed.addFields({
-      name: 'Recommended Actions',
-      value: severity === 'critical' 
-        ? '• Check bot logs immediately\n• Verify database connectivity\n• Restart bot if necessary\n• Check Discord connection'
-        : '• Monitor system performance\n• Check logs for detailed information\n• Consider restarting if issues persist',
+      name: '🔧 System Diagnostics',
+      value: systemDiagnostics,
       inline: false
     });
+
+    // Add circuit breaker status if available
+    const circuitBreakers = errorHandler.getCircuitBreakerStatus();
+    if (Object.keys(circuitBreakers).length > 0) {
+      let cbStatus = '';
+      for (const [key, breaker] of Object.entries(circuitBreakers)) {
+        cbStatus += `**${key}:** ${breaker.state} (${breaker.consecutiveFailures} failures)\n`;
+      }
+      
+      embed.addFields({
+        name: '🔌 Circuit Breakers',
+        value: cbStatus.trim() || 'All circuit breakers healthy',
+        inline: false
+      });
+    }
 
     return embed;
   }
 
   /**
-   * Send API failure notification after multiple retries
+   * Send comprehensive API failure notification with full diagnostic details
    */
   async notifyApiFailure(apiName, error, context = {}) {
     const notificationKey = `api_failure_${apiName}`;
@@ -282,55 +363,122 @@ class NotificationService {
     }
 
     try {
+      // Enhanced diagnostic information gathering
+      const diagnostics = {
+        timestamp: new Date().toISOString(),
+        apiName,
+        retryCount: error.retryCount || 'unknown',
+        httpStatus: error.response?.status || error.status || 'N/A',
+        httpStatusText: error.response?.statusText || error.statusText || 'N/A',
+        apiUrl: error.config?.url || context.url || 'N/A',
+        method: error.config?.method?.toUpperCase() || context.method || 'GET',
+        responseBody: '',
+        requestHeaders: {},
+        responseHeaders: {},
+        errorCode: error.code || 'N/A',
+        context: context
+      };
+
+      // Capture response data safely
+      if (error.response?.data) {
+        try {
+          diagnostics.responseBody = typeof error.response.data === 'string' 
+            ? error.response.data
+            : JSON.stringify(error.response.data, null, 2);
+        } catch (jsonError) {
+          diagnostics.responseBody = 'Unable to parse response data';
+        }
+      } else if (error.response) {
+        diagnostics.responseBody = 'No response body available';
+      }
+
+      // Capture relevant headers (excluding sensitive data)
+      if (error.config?.headers) {
+        const safeHeaders = { ...error.config.headers };
+        delete safeHeaders.Authorization;
+        delete safeHeaders.authorization;
+        diagnostics.requestHeaders = safeHeaders;
+      }
+
+      if (error.response?.headers) {
+        diagnostics.responseHeaders = {
+          'content-type': error.response.headers['content-type'],
+          'content-length': error.response.headers['content-length'],
+          'server': error.response.headers.server,
+          'date': error.response.headers.date
+        };
+      }
+
       const embed = new EmbedBuilder()
-        .setTitle('🔌 API Connection Issue')
-        .setDescription(`The ${apiName} API is experiencing connectivity issues after multiple retry attempts.`)
-        .setColor(0xff6b00) // Orange
+        .setTitle(`🔌 ${apiName} API Failure`)
+        .setDescription(`Critical API failure after ${diagnostics.retryCount} retry attempts. Requires immediate attention.`)
+        .setColor(0xff0000) // Red for API failures
         .addFields(
           {
-            name: 'Service',
-            value: apiName,
-            inline: true
-          },
-          {
-            name: 'Last Error',
-            value: error.message.substring(0, 1000),
+            name: '🌐 Request Details',
+            value: `**Method:** ${diagnostics.method}\n**URL:** \`${diagnostics.apiUrl}\`\n**Error Code:** ${diagnostics.errorCode}`,
             inline: false
           },
           {
-            name: 'Retry Count',
-            value: error.retryCount?.toString() || 'Unknown',
-            inline: true
+            name: '📊 Response Details',
+            value: `**HTTP Status:** ${diagnostics.httpStatus} ${diagnostics.httpStatusText}\n**Content-Type:** ${diagnostics.responseHeaders['content-type'] || 'N/A'}\n**Server:** ${diagnostics.responseHeaders.server || 'N/A'}`,
+            inline: false
           },
           {
-            name: 'Status',
-            value: 'Automatic retries will continue. Manual intervention may be needed if issues persist.',
+            name: '💬 Response Body',
+            value: diagnostics.responseBody ? 
+              `\`\`\`${diagnostics.responseBody.substring(0, 800)}${diagnostics.responseBody.length > 800 ? '...' : ''}\`\`\`` :
+              'No response body available',
+            inline: false
+          },
+          {
+            name: '❌ Error Message',
+            value: `\`\`\`${error.message.substring(0, 500)}${error.message.length > 500 ? '...' : ''}\`\`\``,
+            inline: false
+          }
+        )
+        .addFields(
+          {
+            name: '🔧 Diagnostic Context',
+            value: `**Retry Count:** ${diagnostics.retryCount}\n**Occurred:** ${diagnostics.timestamp}\n**Operation:** ${context.operation || 'Unknown'}\n**Additional Context:** \`${JSON.stringify(context, null, 0).substring(0, 100)}\``,
+            inline: false
+          },
+          {
+            name: '⚡ Next Steps',
+            value: 'Bot will continue retrying automatically. Check API status and credentials if issue persists.',
             inline: false
           }
         )
         .setTimestamp();
 
-      const channel = this.client.channels.cache.get(config.discord.channelId);
-      if (channel) {
-        await channel.send({ embeds: [embed] });
-        this.setCooldown(notificationKey, 45 * 60 * 1000); // 45 minutes cooldown
-        
-        errorHandler.logger.warn('Sent API failure notification', { 
+      // Send comprehensive API failure notification to admin via DM
+      const adminUser = await this.client.users.fetch(config.adminDiscordId);
+      if (adminUser) {
+        await adminUser.send({ embeds: [embed] });
+        errorHandler.logger.error('Sent comprehensive API failure notification via DM to admin', { 
           apiName,
-          error: error.message,
-          context
+          diagnostics,
+          error: error.message
+        });
+      } else {
+        errorHandler.logger.error('Failed to send API failure notification via DM (admin not found)', {
+          apiName,
+          diagnostics,
+          error: error.message
         });
       }
+      this.setCooldown(notificationKey, 45 * 60 * 1000); // 45 minutes cooldown
     } catch (notificationError) {
       errorHandler.logger.error('Failed to send API failure notification', { 
         apiName,
-        error: notificationError.message
+        error: notificationError.message,
+        originalError: error.message
       });
     }
   }
 
   /**
-   * Send database failure notification
+   * Send comprehensive database failure notification with full diagnostic details
    */
   async notifyDatabaseFailure(operation, error, context = {}) {
     const notificationKey = `db_failure_${operation}`;
@@ -341,49 +489,100 @@ class NotificationService {
     }
 
     try {
+      // Enhanced diagnostic information gathering
+      const diagnostics = {
+        timestamp: new Date().toISOString(),
+        operation,
+        retryCount: error.retryCount || 'unknown',
+        errorCode: error.code || error.errno || 'N/A',
+        sqlState: error.sqlState || 'N/A',
+        query: context.query || 'N/A',
+        parameters: context.parameters || [],
+        databasePath: context.databasePath || 'N/A',
+        tableName: context.tableName || 'N/A',
+        transactionActive: context.inTransaction || false,
+        context: context
+      };
+
+      // Sanitize sensitive parameters (remove potential PII)
+      const sanitizedParams = diagnostics.parameters.map((param, index) => {
+        if (typeof param === 'string' && param.length > 50) {
+          return `[String:${param.length}chars]`;
+        }
+        return param;
+      });
+
       const embed = new EmbedBuilder()
-        .setTitle('💾 Database Operation Failed')
-        .setDescription(`A database operation has failed after multiple retry attempts. This may affect bot functionality.`)
-        .setColor(0xff0000) // Red
+        .setTitle(`💾 Database Operation Failure`)
+        .setDescription(`Critical database ${operation} failure after ${diagnostics.retryCount} retry attempts. Database functionality compromised.`)
+        .setColor(0xff0000) // Red for database failures
         .addFields(
           {
-            name: 'Operation',
-            value: operation,
-            inline: true
-          },
-          {
-            name: 'Error Details',
-            value: error.message.substring(0, 1000),
+            name: '🗄️ Database Details',
+            value: `**Operation:** ${diagnostics.operation}\n**Table:** ${diagnostics.tableName}\n**Database:** \`${diagnostics.databasePath}\`\n**Transaction Active:** ${diagnostics.transactionActive ? 'Yes' : 'No'}`,
             inline: false
           },
           {
-            name: 'Retry Count',
-            value: error.retryCount?.toString() || 'Unknown',
-            inline: true
+            name: '📝 Query Information',
+            value: `**SQL Query:**\n\`\`\`sql\n${diagnostics.query.substring(0, 300)}${diagnostics.query.length > 300 ? '...' : ''}\n\`\`\`\n**Parameters:** \`${JSON.stringify(sanitizedParams)}\``,
+            inline: false
           },
           {
-            name: 'Impact',
-            value: 'Some bot features may be temporarily unavailable. The bot will continue to retry automatically.',
+            name: '❌ Error Details',
+            value: `**Error Code:** ${diagnostics.errorCode}\n**SQL State:** ${diagnostics.sqlState}\n**Message:**\n\`\`\`${error.message.substring(0, 400)}${error.message.length > 400 ? '...' : ''}\`\`\``,
+            inline: false
+          }
+        )
+        .addFields(
+          {
+            name: '🔧 Diagnostic Context',
+            value: `**Retry Count:** ${diagnostics.retryCount}\n**Occurred:** ${diagnostics.timestamp}\n**Stack Trace Available:** ${error.stack ? 'Yes' : 'No'}\n**Context:** \`${JSON.stringify(context, null, 0).substring(0, 150)}\``,
+            inline: false
+          },
+          {
+            name: '⚠️ Impact Assessment',
+            value: `Bot features that depend on database operations may be temporarily affected. Automatic retry mechanisms are active.\n\n**Affected Operations:**\n• User RSVP tracking\n• Match thread management\n• User mapping storage\n• Historical data retrieval`,
+            inline: false
+          },
+          {
+            name: '🚨 Recommended Actions',
+            value: `1. Check database file permissions\n2. Verify disk space availability\n3. Monitor for corruption issues\n4. Consider database integrity check\n5. Review recent schema changes`,
             inline: false
           }
         )
         .setTimestamp();
 
-      const channel = this.client.channels.cache.get(config.discord.channelId);
-      if (channel) {
-        await channel.send({ embeds: [embed] });
-        this.setCooldown(notificationKey, 30 * 60 * 1000); // 30 minutes cooldown
-        
-        errorHandler.logger.error('Sent database failure notification', { 
-          operation,
-          error: error.message,
-          context
+      // Add stack trace if available and not too long
+      if (error.stack && error.stack.length < 1000) {
+        embed.addFields({
+          name: '📚 Stack Trace',
+          value: `\`\`\`${error.stack.substring(0, 800)}\`\`\``,
+          inline: false
         });
       }
+
+      // Send comprehensive database failure notification to admin via DM
+      const adminUser = await this.client.users.fetch(config.adminDiscordId);
+      if (adminUser) {
+        await adminUser.send({ embeds: [embed] });
+        errorHandler.logger.error('Sent comprehensive database failure notification via DM to admin', { 
+          operation,
+          diagnostics,
+          error: error.message
+        });
+      } else {
+        errorHandler.logger.error('Failed to send database failure notification via DM (admin not found)', {
+          operation,
+          diagnostics,
+          error: error.message
+        });
+      }
+      this.setCooldown(notificationKey, 30 * 60 * 1000); // 30 minutes cooldown
     } catch (notificationError) {
       errorHandler.logger.error('Failed to send database failure notification', { 
         operation,
-        error: notificationError.message
+        error: notificationError.message,
+        originalError: error.message
       });
     }
   }
