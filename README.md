@@ -1,3 +1,5 @@
+### This was *vibe* coded.
+
 # FACEIT Discord Bot
 
 A comprehensive Discord bot that monitors your FACEIT team's matches and provides interactive commands for match tracking, player management, and RSVP functionality. Built with Docker for easy deployment and includes persistent SQLite storage.
