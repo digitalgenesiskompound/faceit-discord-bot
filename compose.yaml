@@ -1,12 +1,25 @@
 services:
   bot:
-    build: .
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    container_name: faceit-discord-bot
     restart: unless-stopped
     env_file: .env
     volumes:
       - ./data:/app/data
+    ports:
+      - "8080:8080"  # Health check endpoint
+    environment:
+      - NODE_ENV=production
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

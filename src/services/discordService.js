@@ -1,0 +1,826 @@
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { formatMatchTime } = require('../utils/helpers');
+const config = require('../config/config');
+
+class DiscordService {
+  constructor(client, databaseService) {
+    this.client = client;
+    this.db = databaseService;
+  }
+
+  /**
+   * Send notification for a match with RSVP buttons and create thread
+   */
+  async sendMatchNotification(match, channel = null) {
+    try {
+      if (!match || !match.teams || !match.teams.faction1 || !match.teams.faction2) {
+        console.error('Invalid match data for notification');
+        return;
+      }
+      
+      // Check if we already have an active thread for this match
+      const existingThreadId = this.db.matchThreads.get(match.match_id);
+      if (existingThreadId) {
+        // Verify the thread still exists and is accessible
+        const threadExists = await this.validateThread(existingThreadId);
+        if (threadExists) {
+          console.log(`Active thread already exists for match ${match.match_id}, skipping notification`);
+          return;
+        } else {
+          console.log(`Thread ${existingThreadId} for match ${match.match_id} no longer exists, will create new thread`);
+          // Remove stale thread reference
+          this.db.matchThreads.delete(match.match_id);
+          await this.db.removeMatchThread(match.match_id);
+        }
+      }
+      
+      const faction1 = match.teams.faction1.name;
+      const faction2 = match.teams.faction2.name;
+      const matchTimes = formatMatchTime(match.scheduled_at);
+      const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
+      
+      // Store match data for RSVP purposes
+      this.db.upcomingMatches.set(match.match_id, match);
+      
+      // Create a clean, simple RSVP chart
+      const rsvpChart = this.createSimpleRsvpChart(match.match_id);
+      
+      const embed = new EmbedBuilder()
+        .setTitle(`🎮 ${faction1} vs ${faction2}`)
+        .setDescription(`🔗 **[Join Match Room](${matchUrl})**\n\n⏰ **Match Times:**\n${matchTimes.pacific}\n${matchTimes.mountain}\n\n📋 **Team RSVP Status:**\n${rsvpChart}`)
+        .setColor(0x00ff00)
+        .setTimestamp();
+      
+      // Create RSVP buttons
+      const rsvpRow = new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder()
+            .setCustomId(`rsvp_yes_${match.match_id}`)
+            .setLabel('✅ Attending')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`rsvp_no_${match.match_id}`)
+            .setLabel('❌ Not Attending')
+            .setStyle(ButtonStyle.Danger)
+        );
+      
+      // Create status button row
+      const statusRow = new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder()
+            .setCustomId(`rsvp_status_${match.match_id}`)
+            .setLabel('📋 View RSVPs')
+            .setStyle(ButtonStyle.Secondary)
+        );
+      
+      console.log(`Sending notification for match: ${match.match_id} (${faction1} vs ${faction2})`);
+      
+      // Send to specified channel or default notification channel
+      const targetChannel = channel || this.client.channels.cache.get(config.discord.channelId);
+      
+      if (targetChannel) {
+        // Send the main notification message to the channel
+        const message = await targetChannel.send({
+          content: "New match scheduled!",
+          embeds: [embed],
+          components: [rsvpRow, statusRow]
+        });
+        
+        // Create a standalone thread in the channel (not attached to the message)
+        const thread = await targetChannel.threads.create({
+          name: `Match Discussion: ${faction1} vs ${faction2}`,
+          autoArchiveDuration: 60,
+          type: 11, // GUILD_PUBLIC_THREAD
+          reason: `Discussion thread for match: ${faction1} vs ${faction2}`
+        });
+
+        // Store thread reference for this match using the database service
+        await this.db.addMatchThread(match.match_id, thread.id, 'upcoming');
+        
+        // Send a simple RSVP status message to the thread
+        await this.sendSimpleRsvpMessage(thread, match);
+
+        console.log(`Thread created for match: ${thread.name}`);
+        console.log('Notification sent successfully!');
+        
+        // Only mark as processed if this was an automatic notification
+        if (!channel) {
+          this.db.markMatchAsProcessed(match.match_id);
+        }
+      } else {
+        console.error('Could not find target channel for notification');
+      }
+      
+    } catch (err) {
+      console.error(`Error sending notification: ${err.message}`);
+    }
+  }
+
+  /**
+   * Send a simple RSVP status message to the match thread
+   */
+  async sendSimpleRsvpMessage(thread, match) {
+    try {
+      const faction1 = match.teams.faction1.name;
+      const faction2 = match.teams.faction2.name;
+      const matchTimes = formatMatchTime(match.scheduled_at);
+      const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
+      
+      // Get current RSVP status
+      const rsvpStatus = this.createDynamicRsvpStatus(match.match_id);
+      
+      const rsvpEmbed = new EmbedBuilder()
+        .setTitle(`📋 ${faction1} vs ${faction2} - RSVP Status`)
+        .setDescription(`⏰ ${matchTimes.pacific}\n⏰ ${matchTimes.mountain}\n\n🔗 [Join Match Room](${matchUrl})\n\n**Current RSVPs:**\n${rsvpStatus}`)
+        .setColor(0x1e88e5)
+        .setTimestamp()
+        .setFooter({ text: `Match ID: ${match.match_id}` });
+      
+      // Add RSVP buttons
+      const rsvpRow = new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder()
+            .setCustomId(`rsvp_yes_${match.match_id}`)
+            .setLabel('✅ Attending')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`rsvp_no_${match.match_id}`)
+            .setLabel('❌ Not Attending')
+            .setStyle(ButtonStyle.Danger),
+          new ButtonBuilder()
+            .setCustomId(`rsvp_status_${match.match_id}`)
+            .setLabel('📋 View RSVPs')
+            .setStyle(ButtonStyle.Secondary)
+        );
+      
+      await thread.send({ 
+        embeds: [rsvpEmbed], 
+        components: [rsvpRow]
+      });
+      
+      console.log(`Simple RSVP message sent to thread for match ${match.match_id}`);
+      
+    } catch (err) {
+      console.error(`Error sending simple RSVP message: ${err.message}`);
+    }
+  }
+
+  /**
+   * Update thread RSVP message with current status
+   */
+  async updateThreadRsvpStatus(matchId, thread = null) {
+    try {
+      if (!thread) {
+        const threadId = this.db.matchThreads.get(matchId);
+        if (!threadId) {
+          console.log(`No thread found for match ${matchId}`);
+          return;
+        }
+        thread = await this.client.channels.fetch(threadId);
+      }
+      
+      if (!thread) {
+        console.error(`Could not fetch thread for match ${matchId}`);
+        return;
+      }
+      
+      // Get match data for context
+      const match = this.db.upcomingMatches.get(matchId);
+      if (!match) {
+        console.log(`Match ${matchId} not found in database`);
+        return;
+      }
+      
+      const faction1 = match.teams.faction1.name;
+      const faction2 = match.teams.faction2.name;
+      const matchTimes = formatMatchTime(match.scheduled_at);
+      const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
+      
+      // Get updated RSVP status
+      const rsvpStatus = this.createDynamicRsvpStatus(matchId);
+      
+      // Create updated RSVP embed
+      const rsvpEmbed = new EmbedBuilder()
+        .setTitle(`📋 ${faction1} vs ${faction2} - RSVP Status`)
+        .setDescription(`⏰ ${matchTimes.pacific}\n⏰ ${matchTimes.mountain}\n\n🔗 [Join Match Room](${matchUrl})\n\n**Current RSVPs:**\n${rsvpStatus}`)
+        .setColor(0x1e88e5)
+        .setTimestamp()
+        .setFooter({ text: `Match ID: ${match.match_id}` });
+      
+      // Create updated button row
+      const rsvpRow = new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder()
+            .setCustomId(`rsvp_yes_${match.match_id}`)
+            .setLabel('✅ Attending')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`rsvp_no_${match.match_id}`)
+            .setLabel('❌ Not Attending')
+            .setStyle(ButtonStyle.Danger),
+          new ButtonBuilder()
+            .setCustomId(`rsvp_status_${match.match_id}`)
+            .setLabel('📋 View RSVPs')
+            .setStyle(ButtonStyle.Secondary)
+        );
+      
+      // Find the RSVP message in the thread (should be the first bot message)
+      const messages = await thread.messages.fetch({ limit: 10 });
+      const rsvpMessage = messages.find(msg => 
+        msg.author.id === this.client.user.id && 
+        msg.embeds.length > 0 && 
+        msg.embeds[0].title && 
+        msg.embeds[0].title.includes('RSVP Status')
+      );
+      
+      if (rsvpMessage) {
+        await rsvpMessage.edit({ 
+          embeds: [rsvpEmbed], 
+          components: [rsvpRow]
+        });
+        console.log(`Updated RSVP message with status for match ${matchId}`);
+      } else {
+        console.log(`RSVP message not found for match ${matchId}`);
+      }
+      
+    } catch (err) {
+      console.error(`Error updating thread RSVP status: ${err.message}`);
+    }
+  }
+
+  /**
+   * Create a finished match thread with detailed match summary
+   */
+  async createFinishedMatchThread(match, channel = null) {
+    try {
+      if (!match || !match.teams || !match.teams.faction1 || !match.teams.faction2) {
+        console.error('Invalid finished match data');
+        return;
+      }
+
+      // Check if we already have a finished match thread for this match
+      const hasThread = await this.db.hasFinishedMatchThread(match.match_id);
+      if (hasThread) {
+        console.log(`Finished match thread already exists for match ${match.match_id}`);
+        return;
+      }
+
+      const faction1 = match.teams.faction1.name;
+      const faction2 = match.teams.faction2.name;
+      const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
+      
+      // Determine winner and result
+      const winner = this.determineMatchWinner(match);
+      const result = this.formatMatchResult(match);
+      const matchDate = match.finished_at ? new Date(match.finished_at * 1000).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'America/Los_Angeles'
+      }) : 'Unknown';
+
+      // Get target channel
+      const targetChannel = channel || this.client.channels.cache.get(config.discord.channelId);
+      
+      if (!targetChannel) {
+        console.error('Could not find target channel for finished match thread');
+        return;
+      }
+
+      // Create thread for the finished match
+      const threadName = `${faction1} vs ${faction2} - Match Result`;
+      const thread = await targetChannel.threads.create({
+        name: threadName,
+        autoArchiveDuration: 10080, // 7 days
+        type: 11, // GUILD_PUBLIC_THREAD
+        reason: `Result thread for finished match: ${faction1} vs ${faction2}`
+      });
+
+      // Store thread reference using the database service
+      await this.db.addMatchThread(match.match_id, thread.id, 'finished');
+      
+      // Create detailed match summary embed
+      const summaryEmbed = this.createMatchSummaryEmbed(match, winner, result, matchDate);
+      
+      // Send the match summary to the thread
+      await thread.send({ embeds: [summaryEmbed] });
+      
+      // Get team performance data if available
+      const performanceData = await this.getMatchPerformanceData(match);
+      if (performanceData) {
+        const performanceEmbed = this.createPerformanceEmbed(match, performanceData);
+        await thread.send({ embeds: [performanceEmbed] });
+      }
+
+      console.log(`Finished match thread created: ${threadName}`);
+      return thread;
+      
+    } catch (err) {
+      console.error(`Error creating finished match thread: ${err.message}`);
+    }
+  }
+
+  /**
+   * Create detailed match summary embed
+   */
+  createMatchSummaryEmbed(match, winner, result, matchDate) {
+    const faction1 = match.teams.faction1.name;
+    const faction2 = match.teams.faction2.name;
+    const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
+    const isOurTeam = (teamName) => teamName.toLowerCase().includes('our team name'); // Adjust based on your team name
+    
+    // Determine if we won or lost
+    let resultColor = 0x808080; // Default gray
+    let resultIcon = '⚪';
+    
+    if (winner) {
+      if (isOurTeam(winner)) {
+        resultColor = 0x00ff00; // Green for win
+        resultIcon = '🏆';
+      } else {
+        resultColor = 0xff0000; // Red for loss
+        resultIcon = '💔';
+      }
+    }
+    
+    const embed = new EmbedBuilder()
+      .setTitle(`${resultIcon} ${faction1} vs ${faction2} - Match Complete`)
+      .setDescription(`🔗 **[View Match Details](${matchUrl})**\n\n📅 **Match Date:** ${matchDate}\n🏟️ **Competition:** ${match.competition_name || 'FACEIT Match'}\n\n**📊 Final Result:**\n${result}`)
+      .setColor(resultColor)
+      .setTimestamp()
+      .setFooter({ text: `Match ID: ${match.match_id}` });
+    
+    // Add winner field if we have one
+    if (winner) {
+      embed.addFields({
+        name: '🎉 Winner',
+        value: `**${winner}**`,
+        inline: true
+      });
+    }
+    
+    // Add match duration if available
+    if (match.started_at && match.finished_at) {
+      const durationMs = (match.finished_at - match.started_at) * 1000;
+      const durationMinutes = Math.round(durationMs / (1000 * 60));
+      embed.addFields({
+        name: '⏱️ Match Duration',
+        value: `${durationMinutes} minutes`,
+        inline: true
+      });
+    }
+    
+    return embed;
+  }
+
+  /**
+   * Determine match winner from match data
+   */
+  determineMatchWinner(match) {
+    if (!match.results || !match.results.winner) {
+      return null;
+    }
+    
+    const winnerId = match.results.winner;
+    
+    if (match.teams.faction1.faction_id === winnerId) {
+      return match.teams.faction1.name;
+    } else if (match.teams.faction2.faction_id === winnerId) {
+      return match.teams.faction2.name;
+    }
+    
+    return null;
+  }
+
+  /**
+   * Format match result string
+   */
+  formatMatchResult(match) {
+    if (!match.results) {
+      return '📋 Result details not available';
+    }
+    
+    const score = match.results.score || {};
+    const faction1Score = score.faction1 || 0;
+    const faction2Score = score.faction2 || 0;
+    
+    return `**${match.teams.faction1.name}** ${faction1Score} - ${faction2Score} **${match.teams.faction2.name}**`;
+  }
+
+  /**
+   * Get match performance data (if available from FACEIT API)
+   */
+  async getMatchPerformanceData(match) {
+    try {
+      // This would require additional FACEIT API calls to get detailed stats
+      // For now, return null - can be expanded later with detailed player stats
+      return null;
+    } catch (err) {
+      console.error(`Error getting match performance data: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Create performance embed (placeholder for future enhancement)
+   */
+  createPerformanceEmbed(match, performanceData) {
+    return new EmbedBuilder()
+      .setTitle('📈 Team Performance')
+      .setDescription('Detailed performance statistics coming soon!')
+      .setColor(0x1e88e5)
+      .setTimestamp();
+  }
+
+  /**
+   * Async wrapper for thread updates
+   */
+  updateThreadRsvpStatusAsync(matchId) {
+    // Use setTimeout to avoid blocking the main RSVP response
+    setTimeout(async () => {
+      await this.updateThreadRsvpStatus(matchId);
+    }, 1000);
+  }
+
+  /**
+   * Check for new matches and send notifications, also check for finished matches
+   */
+  async checkMatches(faceitService) {
+    try {
+      console.log('🔄 Checking for new matches and finished matches...');
+      
+      // Periodically clean up stale thread references (every 10th check)
+      if (!this.lastCleanupCheck) this.lastCleanupCheck = 0;
+      this.lastCleanupCheck++;
+      if (this.lastCleanupCheck >= 10) {
+        await this.cleanupStaleThreads();
+        this.lastCleanupCheck = 0;
+      }
+      
+      // Check for upcoming matches
+      const matches = await faceitService.getUpcomingMatches();
+      console.log(`Found ${matches.length} upcoming matches`);
+      
+      if (matches.length > 0) {
+        for (const match of matches) {
+          if (!this.db.isMatchProcessed(match.match_id)) {
+            console.log(`New match found: ${match.match_id}`);
+            await this.sendMatchNotification(match);
+          }
+        }
+      } else {
+        console.log('No upcoming matches found.');
+      }
+      
+      // Check for finished matches and create result threads
+      console.log('🏁 Checking for finished matches...');
+      const finishedMatches = await faceitService.getFinishedMatches(10);
+      console.log(`Found ${finishedMatches.length} recent finished matches`);
+      
+      if (finishedMatches.length > 0) {
+        let createdThreads = 0;
+        
+        for (const match of finishedMatches) {
+          try {
+            // Check if we already have a finished match thread for this match
+            const hasThread = await this.db.hasFinishedMatchThread(match.match_id);
+            
+            if (!hasThread) {
+              console.log(`Creating finished match thread for: ${match.match_id}`);
+              const thread = await this.createFinishedMatchThread(match);
+              if (thread) {
+                createdThreads++;
+              }
+              
+              // Small delay to avoid rate limiting
+              await new Promise(resolve => setTimeout(resolve, 500));
+            }
+          } catch (matchErr) {
+            console.error(`Error processing finished match ${match.match_id}: ${matchErr.message}`);
+          }
+        }
+        
+        if (createdThreads > 0) {
+          console.log(`✅ Created ${createdThreads} new finished match threads`);
+        } else {
+          console.log('No new finished match threads needed');
+        }
+      }
+      
+      // Check for finished match threads that need to be locked (72+ hours old)
+      await this.lockOldFinishedMatchThreads();
+      
+      console.log('✅ Match check completed');
+    } catch (err) {
+      console.error(`Error during match check: ${err.message}`);
+    }
+  }
+
+  /**
+   * Send a welcome message to the match thread with match details and instructions
+   */
+  async sendThreadWelcomeMessage(thread, match) {
+    try {
+      const faction1 = match.teams.faction1.name;
+      const faction2 = match.teams.faction2.name;
+      const matchTimes = formatMatchTime(match.scheduled_at);
+      const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
+      
+      // Get current RSVP status for dynamic display
+      const rsvpStatus = this.createDynamicRsvpStatus(match.match_id);
+      
+      const welcomeEmbed = new EmbedBuilder()
+        .setTitle(`🎯 ${faction1} vs ${faction2} - Match Thread`)
+        .setDescription('Welcome to the official discussion thread for this match!')
+        .setColor(0x1e88e5)
+        .addFields(
+          {
+            name: '🕐 Match Time',
+            value: `${matchTimes.pacific}\n${matchTimes.mountain}`,
+            inline: true
+          },
+          {
+            name: '🏆 Competition',
+            value: match.competition_name || 'ESEA Season',
+            inline: true
+          },
+          {
+            name: '🔗 Match Room',
+            value: `[Join Match Room](${matchUrl})`,
+            inline: true
+          },
+          {
+            name: '📝 RSVP Status',
+            value: rsvpStatus,
+            inline: false
+          }
+        )
+        .setTimestamp()
+        .setFooter({ text: `Match ID: ${match.match_id}` });
+      
+      // Add RSVP reminder buttons in the thread
+      const rsvpReminderRow = new ActionRowBuilder()
+        .addComponents(
+          new ButtonBuilder()
+            .setCustomId(`rsvp_yes_${match.match_id}`)
+            .setLabel('✅ I\'m Attending')
+            .setStyle(ButtonStyle.Success),
+          new ButtonBuilder()
+            .setCustomId(`rsvp_no_${match.match_id}`)
+            .setLabel('❌ Can\'t Attend')
+            .setStyle(ButtonStyle.Danger),
+          new ButtonBuilder()
+            .setCustomId(`rsvp_status_${match.match_id}`)
+            .setLabel('📋 Check Status')
+            .setStyle(ButtonStyle.Secondary)
+        );
+      
+      await thread.send({ 
+        embeds: [welcomeEmbed], 
+        components: [rsvpReminderRow]
+      });
+      
+      console.log(`Welcome message sent to thread for match ${match.match_id}`);
+      
+    } catch (err) {
+      console.error(`Error sending thread welcome message: ${err.message}`);
+    }
+  }
+
+  /**
+   * Get a thread by ID
+   */
+  async getThread(threadId) {
+    try {
+      const thread = await this.client.channels.fetch(threadId);
+      return thread;
+    } catch (err) {
+      console.error(`Error fetching thread ${threadId}: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Validate if a thread still exists and is accessible
+   */
+  async validateThread(threadId) {
+    try {
+      const thread = await this.client.channels.fetch(threadId);
+      // Check if thread is archived or locked
+      if (thread && !thread.archived && !thread.locked) {
+        return true;
+      } else if (thread && (thread.archived || thread.locked)) {
+        console.log(`Thread ${threadId} is archived or locked`);
+        return false;
+      }
+      return false;
+    } catch (err) {
+      // Thread doesn't exist or is inaccessible
+      console.log(`Thread ${threadId} validation failed: ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Clean up stale thread references by validating all stored threads
+   */
+  async cleanupStaleThreads() {
+    try {
+      console.log('🧹 Cleaning up stale thread references...');
+      const staleThreads = [];
+      
+      for (const [matchId, threadId] of this.db.matchThreads.entries()) {
+        const isValid = await this.validateThread(threadId);
+        if (!isValid) {
+          staleThreads.push({ matchId, threadId });
+        }
+      }
+      
+      // Remove stale thread references
+      for (const { matchId, threadId } of staleThreads) {
+        console.log(`Removing stale thread reference: ${threadId} for match ${matchId}`);
+        this.db.matchThreads.delete(matchId);
+        await this.db.removeMatchThread(matchId);
+      }
+      
+      console.log(`✅ Cleaned up ${staleThreads.length} stale thread references`);
+      return staleThreads.length;
+    } catch (err) {
+      console.error(`Error during thread cleanup: ${err.message}`);
+      return 0;
+    }
+  }
+
+  /**
+   * Create dynamic RSVP status display for thread welcome messages
+   */
+  createDynamicRsvpStatus(matchId) {
+    try {
+      const matchRsvps = this.db.getRsvpForMatch(matchId);
+      const allUserMappings = this.db.userMappings;
+      const registeredUsers = Object.values(allUserMappings);
+      
+      if (registeredUsers.length === 0) {
+        return 'No team members registered yet. Use the buttons above to RSVP!';
+      }
+      
+      // Categorize users by RSVP status
+      const attendingPlayers = [];
+      const notAttendingPlayers = [];
+      const noResponsePlayers = [];
+      
+      registeredUsers.forEach(user => {
+        const rsvp = matchRsvps[user.discord_id];
+        if (rsvp) {
+          if (rsvp.response === 'yes') {
+            attendingPlayers.push(user.faceit_nickname);
+          } else {
+            notAttendingPlayers.push(user.faceit_nickname);
+          }
+        } else {
+          noResponsePlayers.push(user.faceit_nickname);
+        }
+      });
+      
+      let statusText = '';
+      
+      if (attendingPlayers.length > 0) {
+        statusText += `✅ **Attending (${attendingPlayers.length}):** ${attendingPlayers.join(', ')}\n\n`;
+      }
+      
+      if (notAttendingPlayers.length > 0) {
+        statusText += `❌ **Not Attending (${notAttendingPlayers.length}):** ${notAttendingPlayers.join(', ')}\n\n`;
+      }
+      
+      if (noResponsePlayers.length > 0) {
+        statusText += `⏳ **No Response (${noResponsePlayers.length}):** ${noResponsePlayers.join(', ')}`;
+      }
+      
+      if (statusText === '') {
+        statusText = 'No RSVPs yet. Use the buttons above to respond!';
+      }
+      
+      return statusText;
+      
+    } catch (err) {
+      console.error(`Error creating dynamic RSVP status: ${err.message}`);
+      return 'Error loading RSVP status. Use the buttons above to respond!';
+    }
+  }
+
+  /**
+   * Lock finished match threads that are older than 72 hours
+   */
+  async lockOldFinishedMatchThreads() {
+    try {
+      console.log('🔒 Checking for old finished match threads to lock...');
+      
+      // Get all finished match threads from database
+      const finishedThreads = await this.db.db.getThreadsByType('finished');
+      
+      if (finishedThreads.length === 0) {
+        console.log('No finished match threads found');
+        return;
+      }
+      
+      let lockedCount = 0;
+      const cutoffTime = Date.now() - (72 * 60 * 60 * 1000); // 72 hours ago in milliseconds
+      
+      for (const threadRecord of finishedThreads) {
+        try {
+          const thread = await this.client.channels.fetch(threadRecord.thread_id).catch(() => null);
+          
+          if (!thread) {
+            console.log(`Thread ${threadRecord.thread_id} no longer exists, removing from database`);
+            await this.db.removeMatchThread(threadRecord.match_id);
+            continue;
+          }
+          
+          // Skip if thread is already locked or archived
+          if (thread.locked || thread.archived) {
+            continue;
+          }
+          
+          // Check thread creation time (use created timestamp)
+          const threadCreationTime = thread.createdTimestamp;
+          
+          if (threadCreationTime && threadCreationTime < cutoffTime) {
+            console.log(`Locking old finished match thread: ${thread.name}`);
+            
+            // Lock the thread
+            await thread.setLocked(true, 'Auto-locking finished match thread after 72 hours');
+            
+            // Optionally send a final message before locking
+            await thread.send({
+              embeds: [
+                new EmbedBuilder()
+                  .setTitle('🔒 Thread Locked')
+                  .setDescription('This match thread has been automatically locked after 72 hours. The match discussion is now archived for historical reference.')
+                  .setColor(0x808080)
+                  .setTimestamp()
+              ]
+            });
+            
+            lockedCount++;
+            
+            // Small delay to avoid rate limiting
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          }
+        } catch (threadErr) {
+          console.error(`Error processing thread ${threadRecord.thread_id}: ${threadErr.message}`);
+        }
+      }
+      
+      if (lockedCount > 0) {
+        console.log(`🔒 Locked ${lockedCount} old finished match threads`);
+      } else {
+        console.log('No old finished match threads need locking');
+      }
+    } catch (err) {
+      console.error(`Error locking old finished match threads: ${err.message}`);
+    }
+  }
+
+  /**
+   * Create a simple, clean RSVP chart for match notifications
+   */
+  createSimpleRsvpChart(matchId) {
+    try {
+      const matchRsvps = this.db.getRsvpForMatch(matchId);
+      const allUserMappings = this.db.userMappings;
+      const registeredUsers = Object.values(allUserMappings);
+      
+      if (registeredUsers.length === 0) {
+        return '```\nNo team members registered yet\n```';
+      }
+      
+      // Create a simple chart showing each player and their status
+      let chart = '```\n';
+      
+      registeredUsers.forEach(user => {
+        const rsvp = matchRsvps[user.discord_id];
+        let status = '⏳'; // Default: No response
+        
+        if (rsvp) {
+          status = rsvp.response === 'yes' ? '✅' : '❌';
+        }
+        
+        // Format: [Status] PlayerName
+        const name = user.faceit_nickname.padEnd(12).substring(0, 12);
+        chart += `${status} ${name}\n`;
+      });
+      
+      chart += '\n✅ Attending  ❌ Not Attending  ⏳ No Response\n```';
+      
+      return chart;
+      
+    } catch (err) {
+      console.error(`Error creating RSVP chart: ${err.message}`);
+      return '```\nError loading RSVP status\n```';
+    }
+  }
+}
+
+module.exports = DiscordService;
