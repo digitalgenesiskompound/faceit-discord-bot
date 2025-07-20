@@ -11,7 +11,6 @@ const faceitService = require('./services/faceitService');
 const errorHandler = require('./utils/errorHandler');
 
 // Import handlers
-const MessageHandler = require('./handlers/messageHandler');
 const ButtonHandler = require('./handlers/buttonHandler');
 
 class FaceitBot {
@@ -31,8 +30,8 @@ class FaceitBot {
     this.notificationService = new NotificationService(this.client, this.db);
     
     // Initialize handlers
-    this.messageHandler = new MessageHandler(this.client, this.db, this.discordService);
     this.buttonHandler = new ButtonHandler(this.client, this.db, this.discordService);
+    this.slashCommandHandler = new (require('./handlers/slashCommandHandler'))(this.client, this.db, this.discordService);
 
     // Setup event handlers
     this.setupEventHandlers();
@@ -64,6 +63,10 @@ class FaceitBot {
         this.startHealthServer();
         console.log('✅ Health check server started');
         
+        // Register slash commands
+        await this.slashCommandHandler.registerSlashCommands();
+        console.log('✅ Slash commands registered');
+        
         console.log('🚀 Bot is ready and monitoring for matches!');
         
         // Perform initial match check
@@ -76,25 +79,32 @@ class FaceitBot {
       }
     });
 
-    // Message event handler
+    // Message event handler - Disabled (all commands are now slash commands)
     this.client.on('messageCreate', async (message) => {
-      if (message.author.bot || !message.content.startsWith('!')) return;
-      
-      try {
-        await this.messageHandler.handleMessage(message);
-      } catch (error) {
-        console.error('Error handling message:', error);
-      }
+      if (message.author.bot) return;
+      // No longer handling prefix commands
     });
 
-    // Button interaction handler
+    // Interaction handler
     this.client.on('interactionCreate', async (interaction) => {
-      if (!interaction.isButton()) return;
+      console.log(`📥 Interaction received: Type=${interaction.type}, User=${interaction.user.tag}`);
       
-      try {
-        await this.buttonHandler.handleButtonInteraction(interaction);
-      } catch (error) {
-        console.error('Error handling button interaction:', error);
+      if (interaction.isButton()) {
+        console.log(`🔘 Button interaction: ${interaction.customId}`);
+        try {
+          await this.buttonHandler.handleButtonInteraction(interaction);
+        } catch (error) {
+          console.error('Error handling button interaction:', error);
+        }
+      } else if (interaction.isCommand()) {
+        console.log(`⚡ Slash command interaction: /${interaction.commandName}`);
+        try {
+          await this.slashCommandHandler.handleSlashCommand(interaction);
+        } catch (error) {
+          console.error('Error handling slash command interaction:', error);
+        }
+      } else {
+        console.log(`❓ Unknown interaction type: ${interaction.type}`);
       }
     });
 
@@ -223,7 +233,7 @@ class FaceitBot {
           discord_ready: this.client.isReady(),
           database_ready: this.db.isReady,
           uptime: process.uptime(),
-          version: '2.0.0-modular'
+          version: '3.0.0-slash-commands'
         }));
         return;
       }
@@ -246,7 +256,7 @@ class FaceitBot {
   async start() {
     try {
       console.log('🔄 Starting FACEIT Discord Bot...');
-      console.log(`📝 Version: 2.0.0-modular`);
+      console.log(`📝 Version: 3.0.0-slash-commands`);
       console.log(`🎮 Game: Counter-Strike 2`);
       console.log(`🎯 Team ID: ${config.faceit.teamId}`);
       console.log(`📡 Channel: ${config.discord.channelId}`);

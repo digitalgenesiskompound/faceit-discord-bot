@@ -151,6 +151,82 @@ class Database {
     );
   }
 
+  // TRANSACTION SUPPORT
+  /**
+   * Execute multiple operations within a single transaction
+   * @param {Function} callback - Async function containing database operations
+   * @returns {Promise} - Result of the callback function
+   */
+  async transaction(callback) {
+    if (!callback || typeof callback !== 'function') {
+      throw new Error('Transaction callback must be a function');
+    }
+
+    errorHandler.logger.debug('Starting database transaction');
+    
+    await this.run('BEGIN TRANSACTION');
+    
+    try {
+      const result = await callback();
+      await this.run('COMMIT');
+      
+      errorHandler.logger.debug('Database transaction committed successfully');
+      return result;
+    } catch (error) {
+      errorHandler.logger.error('Database transaction failed, rolling back', {
+        error: error.message,
+        stack: error.stack
+      });
+      
+      try {
+        await this.run('ROLLBACK');
+        errorHandler.logger.debug('Database transaction rolled back successfully');
+      } catch (rollbackError) {
+        errorHandler.logger.error('Failed to rollback transaction', {
+          error: rollbackError.message
+        });
+        // Don't throw rollback error, throw original error
+      }
+      
+      throw error;
+    }
+  }
+
+  /**
+   * Execute operations in a transaction with automatic retry on conflict
+   * @param {Function} callback - Async function containing database operations
+   * @param {Object} options - Transaction options
+   * @returns {Promise} - Result of the callback function
+   */
+  async transactionWithRetry(callback, options = {}) {
+    const { maxRetries = 3, retryDelay = 100 } = options;
+    
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await this.transaction(callback);
+      } catch (error) {
+        // Retry on database busy/locked errors
+        const isRetryableError = error.code === 'SQLITE_BUSY' || 
+                                error.code === 'SQLITE_LOCKED' ||
+                                error.message.includes('database is locked');
+        
+        if (isRetryableError && attempt < maxRetries) {
+          errorHandler.logger.warn(`Transaction attempt ${attempt} failed, retrying...`, {
+            error: error.message,
+            attempt,
+            maxRetries
+          });
+          
+          // Wait before retry with exponential backoff
+          await new Promise(resolve => setTimeout(resolve, retryDelay * attempt));
+          continue;
+        }
+        
+        throw error;
+      }
+    }
+  }
+
   // Enhanced get method with retry logic for SELECT (single row)
   async get(sql, params = []) {
     const operationName = this.extractOperationName(sql) + '_get';
@@ -552,6 +628,9 @@ class Database {
     if (trimmedSql.startsWith('CREATE')) return 'CREATE';
     if (trimmedSql.startsWith('DROP')) return 'DROP';
     if (trimmedSql.startsWith('ALTER')) return 'ALTER';
+    if (trimmedSql.startsWith('BEGIN')) return 'BEGIN';
+    if (trimmedSql.startsWith('COMMIT')) return 'COMMIT';
+    if (trimmedSql.startsWith('ROLLBACK')) return 'ROLLBACK';
     return 'UNKNOWN';
   }
 }

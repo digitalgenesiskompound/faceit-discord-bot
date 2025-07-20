@@ -212,6 +212,89 @@ class DatabaseService {
     }
   }
 
+  // Admin methods for data management
+  async getAllUserMappings() {
+    try {
+      return await this.db.getAllUserMappings();
+    } catch (err) {
+      console.error(`Error getting all user mappings: ${err.message}`);
+      return [];
+    }
+  }
+
+  async getAllRsvpData() {
+    try {
+      return await this.db.getAllRsvpData();
+    } catch (err) {
+      console.error(`Error getting all RSVP data: ${err.message}`);
+      return [];
+    }
+  }
+
+  async clearAllUserMappings() {
+    try {
+      await this.db.clearAllUserMappings();
+      // Clear memory cache too
+      this.userMappings = {};
+      console.log('Cleared all user mappings from database and memory');
+    } catch (err) {
+      console.error(`Error clearing all user mappings: ${err.message}`);
+      throw err;
+    }
+  }
+
+  async clearAllRsvpData() {
+    try {
+      await this.db.clearAllRsvpData();
+      // Clear memory cache too
+      this.rsvpStatus = {};
+      console.log('Cleared all RSVP data from database and memory');
+    } catch (err) {
+      console.error(`Error clearing all RSVP data: ${err.message}`);
+      throw err;
+    }
+  }
+
+  async getUserMappingByFaceitId(faceitPlayerId) {
+    try {
+      // Check memory cache first
+      const mapping = Object.values(this.userMappings).find(
+        user => user.faceit_player_id === faceitPlayerId
+      );
+      if (mapping) {
+        return mapping;
+      }
+      
+      // Fall back to database
+      return await this.db.getUserMappingByFaceitId(faceitPlayerId);
+    } catch (err) {
+      console.error(`Error getting user mapping by FACEIT ID: ${err.message}`);
+      return null;
+    }
+  }
+
+  async getMatchThread(matchId) {
+    try {
+      // Check memory cache first
+      const threadId = this.matchThreads.get(matchId);
+      if (threadId) {
+        return threadId;
+      }
+      
+      // Fall back to database
+      const thread = await this.db.getMatchThread(matchId);
+      if (thread) {
+        // Update cache
+        this.matchThreads.set(matchId, thread.thread_id);
+        return thread.thread_id;
+      }
+      return null;
+    } catch (err) {
+      console.error(`Error getting match thread: ${err.message}`);
+      return null;
+    }
+  }
+
   // Cleanup methods
   async cleanupOldRsvpData() {
     try {

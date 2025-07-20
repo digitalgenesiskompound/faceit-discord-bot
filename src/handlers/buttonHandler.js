@@ -1,5 +1,4 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const HelpCommand = require('./commands/helpCommand');
 const config = require('../config/config');
 
 class ButtonHandler {
@@ -7,19 +6,12 @@ class ButtonHandler {
     this.client = client;
     this.db = databaseService;
     this.discordService = discordService;
-    this.helpCommand = new HelpCommand(databaseService, discordService);
   }
 
   /**
    * Handle button interactions
    */
   async handleButtonInteraction(interaction) {
-    // Handle help buttons
-    if (interaction.customId.startsWith('help_')) {
-      await this.handleHelpButton(interaction);
-      return;
-    }
-    
     if (!interaction.customId.startsWith('rsvp_')) {
       return;
     }
@@ -46,7 +38,7 @@ class ButtonHandler {
       const userMapping = this.db.getUserMappingByDiscordId(userId);
       if (!userMapping) {
         await interaction.reply({ 
-          content: '❌ You must be linked to a FACEIT account to RSVP. Use `!register` to see available players, then `!link <nickname>` to link your account.', 
+          content: '❌ You must be linked to a FACEIT account to RSVP. Use `/register` to see available players, then `/link <nickname>` to link your account. **Note: Nickname is case-sensitive.**',
           ephemeral: true 
         });
         return;
@@ -67,7 +59,7 @@ class ButtonHandler {
       });
       
       // Update thread RSVP status
-      this.discordService.updateThreadRsvpStatusAsync(matchId);
+      await this.discordService.updateThreadRsvpStatusAsync(matchId);
       
       console.log(`RSVP ${actionText} via button: ${interaction.user.tag} (${userMapping.faceit_nickname}) -> ${response} for match ${matchId}`);
       
@@ -209,38 +201,6 @@ class ButtonHandler {
     }
   }
 
-  /**
-   * Handle help button interactions
-   */
-  async handleHelpButton(interaction) {
-    try {
-      const topic = interaction.customId.replace('help_', '');
-      let embed;
-      
-      switch (topic) {
-        case 'admin':
-          // Check if user has admin permissions
-          if (interaction.user.id !== config.adminDiscordId) {
-            await interaction.reply({ content: '❌ You do not have permission to view admin commands.', ephemeral: true });
-            return;
-          }
-          embed = this.helpCommand.createAdminHelpEmbed();
-          break;
-        default:
-          await interaction.reply({ content: '❌ Unknown help topic.', ephemeral: true });
-          return;
-      }
-      
-      await interaction.reply({ embeds: [embed], ephemeral: true });
-      
-    } catch (err) {
-      console.error(`Error handling help button: ${err.message}`);
-      await interaction.reply({ 
-        content: '❌ Sorry, there was an error displaying help information.', 
-        ephemeral: true 
-      });
-    }
-  }
 }
 
 module.exports = ButtonHandler;
