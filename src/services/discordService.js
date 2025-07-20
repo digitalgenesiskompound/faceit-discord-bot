@@ -319,11 +319,27 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         return;
       }
 
-      // Check if we already have a finished match thread for this match
-      const hasThread = await this.db.hasFinishedMatchThread(match.match_id);
-      if (hasThread) {
-        console.log(`Finished match thread already exists for match ${match.match_id}`);
+      console.log(`🔍 Checking for existing finished match thread for match ${match.match_id}`);  
+
+      // Enhanced duplicate check - check both database and memory cache
+      const hasThreadInDB = await this.db.hasFinishedMatchThread(match.match_id);
+      const hasThreadInMemory = this.db.matchThreads.has(match.match_id);
+      
+      if (hasThreadInDB) {
+        console.log(`⚠️ Finished match thread already exists in database for match ${match.match_id}`);
         return;
+      }
+      
+      if (hasThreadInMemory) {
+        // Double-check if the thread in memory is actually a finished thread
+        const threadId = this.db.matchThreads.get(match.match_id);
+        const threadData = await this.db.db.getThreadsByType('finished');
+        const isFinishedThread = threadData.some(t => t.match_id === match.match_id && t.thread_id === threadId);
+        
+        if (isFinishedThread) {
+          console.log(`⚠️ Finished match thread already exists in memory cache for match ${match.match_id}`);
+          return;
+        }
       }
 
       // Save finished match data to database before creating thread
@@ -396,16 +412,31 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
         reason: `Result thread for finished match: ${faction1} vs ${faction2}`
       });
 
-      // Store thread reference using the database service FIRST
+      // Store thread reference using the database service FIRST with enhanced logging
+      console.log(`💾 Saving finished match thread to database: ${match.match_id} -> ${thread.id}`);
       await this.db.addMatchThread(match.match_id, thread.id, 'finished');
       
-      // Verify the thread was actually saved
+      // Verify the thread was actually saved with enhanced verification
       const savedThread = await this.db.hasFinishedMatchThread(match.match_id);
       if (!savedThread) {
-        console.error(`Failed to save finished match thread for ${match.match_id}`);
+        console.error(`❌ CRITICAL: Failed to save finished match thread for ${match.match_id}`);
+        console.error(`Thread ID: ${thread.id}, Thread Name: ${threadName}`);
+        // Clean up the created thread since we couldn't save it
+        try {
+          await thread.delete('Failed to save thread reference to database');
+          console.log(`🗑️ Cleaned up unsaved thread: ${threadName}`);
+        } catch (deleteErr) {
+          console.error(`Failed to cleanup unsaved thread: ${deleteErr.message}`);
+        }
         return;
       }
-      console.log(`✅ Successfully saved finished match thread for ${match.match_id}`);
+      console.log(`✅ Successfully saved finished match thread for ${match.match_id}: ${thread.id}`);
+      
+      // Also verify it's in memory cache
+      const memoryThreadId = this.db.matchThreads.get(match.match_id);
+      if (memoryThreadId !== thread.id) {
+        console.warn(`⚠️ Memory cache mismatch for match ${match.match_id}: expected ${thread.id}, got ${memoryThreadId}`);
+      }
       
       // Create detailed match summary embed
       const summaryEmbed = this.createMatchSummaryEmbed(match, winner, result, matchDate);
