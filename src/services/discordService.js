@@ -668,7 +668,8 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       }
       
       // Check for finished match threads that need to be locked (72+ hours old)
-      await this.lockOldFinishedMatchThreads(faceitService);
+      // Pass the finished matches data to avoid duplicate API calls
+      await this.lockOldFinishedMatchThreads(faceitService, finishedMatches);
       
       console.log('✅ Match check completed');
     } catch (err) {
@@ -907,9 +908,18 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
   /**
    * Lock finished match threads that are older than 72 hours based on match finish time
    */
-  async lockOldFinishedMatchThreads(faceitService) {
+  async lockOldFinishedMatchThreads(faceitService, finishedMatches = []) {
     try {
       console.log('🔒 Checking for old finished match threads to lock...');
+      
+      // Create a lookup map for finished matches to avoid redundant API calls
+      const finishedMatchLookup = new Map();
+      if (finishedMatches && finishedMatches.length > 0) {
+        finishedMatches.forEach(match => {
+          finishedMatchLookup.set(match.match_id, match);
+        });
+        console.log(`📋 Using cached data for ${finishedMatchLookup.size} recently finished matches`);
+      }
       
       // Get all finished match threads from database
       const finishedThreads = await this.db.db.getThreadsByType('finished');
@@ -939,32 +949,54 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
           }
           
           // Get match data to check the actual match finish time
-          const matchData = await this.db.db.getMatch(threadRecord.match_id);
+          let matchData = await this.db.db.getMatch(threadRecord.match_id);
+          let matchFinishTime = null;
           
-          if (!matchData) {
-            console.log(`⚠️ No match data found for thread ${threadRecord.thread_id} (match: ${threadRecord.match_id})`);
-            console.log(`This is likely a thread created before the database persistence fix.`);
-            
-            // Try to fetch match data from FACEIT API for legacy threads
-            console.log(`🔍 Attempting to fetch match data from FACEIT API for legacy match: ${threadRecord.match_id}`);
-            
-            try {
-              // We need access to faceitService here - it should be passed to checkMatches method
-              // For now, skip legacy threads until we have proper FACEIT match finish data
-              console.log(`⏭️ Skipping legacy thread without FACEIT match data: ${thread.name}`);
-              console.log(`Legacy threads will only be locked once we have the actual FACEIT match finish time`);
-              continue;
-            } catch (apiErr) {
-              console.error(`❌ Failed to fetch FACEIT match data for ${threadRecord.match_id}: ${apiErr.message}`);
-              console.log(`⏭️ Skipping legacy thread due to API error: ${thread.name}`);
+          if (matchData && matchData.finished_at) {
+            // Use stored finish time from database
+            matchFinishTime = matchData.finished_at * 1000; // Convert to milliseconds
+            console.log(`Using stored finish time for match ${threadRecord.match_id}: ${new Date(matchFinishTime).toLocaleString()}`);
+          } else {
+            // No stored match data - check if we have it in the cached finished matches
+            const cachedMatch = finishedMatchLookup.get(threadRecord.match_id);
+            if (cachedMatch && cachedMatch.finished_at) {
+              matchFinishTime = cachedMatch.finished_at * 1000; // Convert to milliseconds
+              console.log(`Using cached FACEIT data for legacy match ${threadRecord.match_id}: ${new Date(matchFinishTime).toLocaleString()}`);
+              
+              // Optionally save this data to database for future use
+              try {
+                const winner = this.determineMatchWinner(cachedMatch);
+                const result = this.formatMatchResult(cachedMatch);
+                
+                await this.db.db.addOrUpdateMatch({
+                  match_id: cachedMatch.match_id,
+                  teams: cachedMatch.teams,
+                  scheduled_at: cachedMatch.scheduled_at,
+                  competition_name: cachedMatch.competition_name || 'FACEIT Match',
+                  status: 'FINISHED'
+                });
+                
+                await this.db.db.updateMatchResult(
+                  cachedMatch.match_id,
+                  result,
+                  winner,
+                  cachedMatch.finished_at
+                );
+                
+                console.log(`💾 Saved cached match data to database for future reference: ${cachedMatch.match_id}`);
+              } catch (saveErr) {
+                console.error(`Failed to save cached match data: ${saveErr.message}`);
+                // Continue with locking even if save fails
+              }
+            } else {
+              console.log(`⚠️ No match finish data available for thread ${threadRecord.thread_id} (match: ${threadRecord.match_id})`);
+              console.log(`This is likely a legacy thread created before database persistence was implemented.`);
+              console.log(`⏭️ Skipping thread until FACEIT match finish data is available: ${thread.name}`);
               continue;
             }
           }
           
-          // Use match finish time (finished_at) instead of thread creation time
-          // finished_at is stored as unix timestamp in seconds, convert to milliseconds
-          const matchFinishTime = matchData.finished_at ? matchData.finished_at * 1000 : null;
-          
+          // Check if the match is old enough to lock (72+ hours since finish)
           if (matchFinishTime && matchFinishTime < cutoffTime) {
             console.log(`Locking old finished match thread: ${thread.name} (match finished ${new Date(matchFinishTime).toLocaleString()})`);
             
@@ -986,8 +1018,9 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
             
             // Small delay to avoid rate limiting
             await new Promise(resolve => setTimeout(resolve, 1000));
-          } else if (!matchFinishTime) {
-            console.log(`Match ${threadRecord.match_id} has no finish time recorded, skipping thread lock`);
+          } else if (matchFinishTime) {
+            const hoursRemaining = Math.ceil((matchFinishTime + (72 * 60 * 60 * 1000) - Date.now()) / (60 * 60 * 1000));
+            console.log(`Match ${threadRecord.match_id} will be eligible for locking in ${hoursRemaining} hours`);
           }
         } catch (threadErr) {
           console.error(`Error processing thread ${threadRecord.thread_id}: ${threadErr.message}`);
