@@ -53,8 +53,22 @@ class ButtonHandler {
       const responseEmoji = response === 'yes' ? '✅' : '❌';
       const actionText = existingRsvp ? 'updated' : 'recorded';
       
+      // Get thread link if available
+      let threadLink = '';
+      const threadId = this.db.matchThreads.get(matchId);
+      if (threadId) {
+        try {
+          const thread = await this.client.channels.fetch(threadId);
+          if (thread) {
+            threadLink = `\n🔗 [View Match Thread](https://discord.com/channels/${thread.guild.id}/${threadId})`;
+          }
+        } catch (err) {
+          console.log(`Could not fetch thread link for match ${matchId}: ${err.message}`);
+        }
+      }
+      
       await interaction.reply({ 
-        content: `${responseEmoji} Your RSVP has been ${actionText}! **${userMapping.faceit_nickname}** - ${response.toUpperCase()}`, 
+        content: `${responseEmoji} Your RSVP has been ${actionText}! **${userMapping.faceit_nickname}** - ${response.toUpperCase()}${threadLink}`, 
         ephemeral: true 
       });
       
