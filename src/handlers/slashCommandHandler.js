@@ -4,10 +4,11 @@ const faceitService = require('../services/faceitService');
 const config = require('../config/config');
 
 class SlashCommandHandler {
-  constructor(client, databaseService, discordService) {
+  constructor(client, databaseService, discordService, backupService) {
     this.client = client;
     this.db = databaseService;
     this.discordService = discordService;
+    this.backupService = backupService;
     this.commands = new Map();
     
     this.setupSlashCommands();
@@ -113,6 +114,19 @@ class SlashCommandHandler {
       .setName('cleanup-threads')
       .setDescription('Clean up old match threads (admin only)');
 
+    // Backup management commands (admin only)
+    const backupCreateCommand = new SlashCommandBuilder()
+      .setName('backup-create')
+      .setDescription('Create a manual database backup (admin only)');
+
+    const backupListCommand = new SlashCommandBuilder()
+      .setName('backup-list')
+      .setDescription('List all available database backups (admin only)');
+
+    const backupStatusCommand = new SlashCommandBuilder()
+      .setName('backup-status')
+      .setDescription('Show backup service status and statistics (admin only)');
+
     // Store command definitions
     this.commands.set('matches', matchesCommand);
     this.commands.set('profile', profileCommand);
@@ -130,6 +144,9 @@ class SlashCommandHandler {
     this.commands.set('clean-user-mappings', cleanUserMappingsCommand);
     this.commands.set('clean-rsvp-status', cleanRsvpStatusCommand);
     this.commands.set('cleanup-threads', cleanupThreadsCommand);
+    this.commands.set('backup-create', backupCreateCommand);
+    this.commands.set('backup-list', backupListCommand);
+    this.commands.set('backup-status', backupStatusCommand);
   }
 
   /**
@@ -223,6 +240,15 @@ class SlashCommandHandler {
           break;
         case 'cleanup-threads':
           await this.handleCleanupThreadsCommand(interaction);
+          break;
+        case 'backup-create':
+          await this.handleBackupCreateCommand(interaction);
+          break;
+        case 'backup-list':
+          await this.handleBackupListCommand(interaction);
+          break;
+        case 'backup-status':
+          await this.handleBackupStatusCommand(interaction);
           break;
         default:
           await interaction.reply({ 
@@ -468,6 +494,9 @@ class SlashCommandHandler {
         adminCommands.push('`/clean-user-mappings` - Clean user data');
         adminCommands.push('`/clean-rsvp-status` - Clean RSVP data');
         adminCommands.push('`/cleanup-threads` - Clean old threads');
+        adminCommands.push('`/backup-create` - Create manual backup');
+        adminCommands.push('`/backup-list` - List all backups');
+        adminCommands.push('`/backup-status` - Show backup status');
       }
       
       if (adminCommands.length > 0) {
@@ -897,6 +926,182 @@ class SlashCommandHandler {
     } catch (err) {
       console.error(`Error handling /cleanup-threads command: ${err.message}`);
       await interaction.editReply('❌ Sorry, there was an error cleaning up threads.');
+    }
+  }
+
+  /**
+   * Handle /backup-create command (admin only)
+   */
+  async handleBackupCreateCommand(interaction) {
+    if (!this.checkAdminPermissions(interaction)) return;
+
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+      console.log(`User ${interaction.user.tag} requested manual backup creation`);
+
+      const result = await this.backupService.performBackup('manual');
+      
+      if (result.success) {
+        const embed = new EmbedBuilder()
+          .setTitle('💾 Database Backup Created Successfully')
+          .setDescription('Manual database backup completed successfully!')
+          .addFields(
+            { name: '📁 Backup Location', value: `\`${result.backupPath.split('\\').pop()}\``, inline: false },
+            { name: '📊 File Size', value: `${(result.size / 1024 / 1024).toFixed(2)} MB`, inline: true },
+            { name: '⏱️ Duration', value: `${result.duration}ms`, inline: true },
+            { name: '🔐 Method', value: 'SQLite VACUUM INTO', inline: true }
+          )
+          .setColor(0x00ff00)
+          .setTimestamp();
+        
+        await interaction.editReply({ embeds: [embed] });
+        console.log(`Manual backup created successfully by ${interaction.user.tag}`);
+      } else {
+        await interaction.editReply(`❌ Backup failed: ${result.error}`);
+      }
+    } catch (err) {
+      console.error(`Error handling /backup-create command: ${err.message}`);
+      await interaction.editReply('❌ Sorry, there was an error creating the backup.');
+    }
+  }
+
+  /**
+   * Handle /backup-list command (admin only)
+   */
+  async handleBackupListCommand(interaction) {
+    if (!this.checkAdminPermissions(interaction)) return;
+
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+      console.log(`User ${interaction.user.tag} requested backup list`);
+
+      const backups = await this.backupService.listBackups();
+      const status = await this.backupService.getStatus();
+      
+      if (backups.length === 0) {
+        await interaction.editReply('📂 No database backups found.');
+        return;
+      }
+
+      const totalSize = backups.reduce((sum, backup) => sum + backup.size, 0);
+      const embed = new EmbedBuilder()
+        .setTitle('📋 Database Backup List')
+        .setDescription(`Found ${backups.length} backup(s) totaling ${(totalSize / 1024 / 1024).toFixed(2)} MB`)
+        .setColor(0x0099ff)
+        .setTimestamp();
+
+      // Show up to 10 most recent backups
+      const recentBackups = backups.slice(0, 10);
+      let backupList = '';
+      
+      recentBackups.forEach((backup, index) => {
+        const created = new Date(backup.created).toLocaleString();
+        backupList += `**${index + 1}.** \`${backup.name}\`\n`;
+        backupList += `   📅 ${created}\n`;
+        backupList += `   📊 ${backup.sizeFormatted}\n\n`;
+      });
+
+      if (backupList.length > 4000) {
+        backupList = backupList.substring(0, 3900) + '...\n\n*List truncated*';
+      }
+
+      embed.addFields({
+        name: '🗂️ Recent Backups',
+        value: backupList || 'No backups to display',
+        inline: false
+      });
+
+      if (status.latestBackup) {
+        embed.addFields({
+          name: '✨ Latest Backup',
+          value: `${status.latestBackup.name}\n📅 ${new Date(status.latestBackup.created).toLocaleString()}\n📊 ${status.latestBackup.sizeFormatted}`,
+          inline: false
+        });
+      }
+
+      if (backups.length > 10) {
+        embed.setFooter({ text: `Showing 10 of ${backups.length} total backups` });
+      }
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error(`Error handling /backup-list command: ${err.message}`);
+      await interaction.editReply('❌ Sorry, there was an error listing backups.');
+    }
+  }
+
+  /**
+   * Handle /backup-status command (admin only)
+   */
+  async handleBackupStatusCommand(interaction) {
+    if (!this.checkAdminPermissions(interaction)) return;
+
+    await interaction.deferReply({ ephemeral: true });
+
+    try {
+      console.log(`User ${interaction.user.tag} requested backup status`);
+
+      const status = await this.backupService.getStatus();
+      
+      const embed = new EmbedBuilder()
+        .setTitle('💾 Backup Service Status')
+        .setColor(status.isRunning ? 0xff9500 : 0x00ff00)
+        .setTimestamp();
+
+      const serviceStatus = status.isRunning ? '🟡 Backup in progress...' : '🟢 Ready';
+      const periodicStatus = status.periodicBackupsEnabled ? '✅ Enabled (every 6 hours)' : '❌ Disabled';
+      
+      embed.addFields(
+        { name: '🔧 Service Status', value: serviceStatus, inline: true },
+        { name: '⏰ Periodic Backups', value: periodicStatus, inline: true },
+        { name: '📂 Backup Directory', value: `\`${status.backupDirectory}\``, inline: false }
+      );
+
+      if (!status.error) {
+        const totalSizeMB = (status.totalBackupSize / 1024 / 1024).toFixed(2);
+        
+        embed.addFields(
+          { name: '📊 Statistics', value: `**Total Backups:** ${status.totalBackups}\n**Total Size:** ${totalSizeMB} MB`, inline: true }
+        );
+
+        if (status.latestBackup) {
+          const latestDate = new Date(status.latestBackup.created).toLocaleString();
+          embed.addFields({
+            name: '✨ Latest Backup',
+            value: `**File:** ${status.latestBackup.name}\n**Size:** ${status.latestBackup.sizeFormatted}\n**Created:** ${latestDate}`,
+            inline: true
+          });
+        }
+
+        if (status.oldestBackup && status.totalBackups > 1) {
+          const oldestDate = new Date(status.oldestBackup.created).toLocaleString();
+          embed.addFields({
+            name: '📅 Oldest Backup',
+            value: `**File:** ${status.oldestBackup.name}\n**Created:** ${oldestDate}`,
+            inline: true
+          });
+        }
+      } else {
+        embed.addFields({
+          name: '❌ Error',
+          value: status.error,
+          inline: false
+        });
+        embed.setColor(0xff0000);
+      }
+
+      embed.addFields({
+        name: '💡 Tips',
+        value: '• Use `/backup-create` for manual backups\n• Use `/backup-list` to view all backups\n• Backups are stored with SQLite VACUUM for data integrity',
+        inline: false
+      });
+
+      await interaction.editReply({ embeds: [embed] });
+    } catch (err) {
+      console.error(`Error handling /backup-status command: ${err.message}`);
+      await interaction.editReply('❌ Sorry, there was an error getting backup status.');
     }
   }
 }

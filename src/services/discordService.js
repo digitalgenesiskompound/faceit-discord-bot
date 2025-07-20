@@ -6,6 +6,14 @@ class DiscordService {
   constructor(client, databaseService) {
     this.client = client;
     this.db = databaseService;
+    
+    // Query cache to reduce redundant database operations
+    this.queryCache = {
+      matchThreads: new Map(), // Cache for match thread lookups
+      lastCacheReset: Date.now(),
+      cacheTTL: 5 * 60 * 1000, // 5 minutes TTL for cache
+      sessionCache: new Map() // Per-session cache that lasts for one checkMatches cycle
+    };
   }
 
   /**
@@ -18,20 +26,11 @@ class DiscordService {
         return;
       }
       
-      // Check if we already have an active thread for this match
-      const existingThreadId = this.db.matchThreads.get(match.match_id);
-      if (existingThreadId) {
-        // Verify the thread still exists and is accessible
-        const threadExists = await this.validateThread(existingThreadId);
-        if (threadExists) {
-          console.log(`Active thread already exists for match ${match.match_id}, skipping notification`);
-          return;
-        } else {
-          console.log(`Thread ${existingThreadId} for match ${match.match_id} no longer exists, will create new thread`);
-          // Remove stale thread reference
-          this.db.matchThreads.delete(match.match_id);
-          await this.db.removeMatchThread(match.match_id);
-        }
+      // Check if we already have ANY thread for this match (upcoming or finished) - use fresh query for new notifications
+      const hasAnyExistingThread = await this.db.hasAnyMatchThread(match.match_id);
+      if (hasAnyExistingThread) {
+        console.log(`⚠️ Thread already exists for match ${match.match_id}, skipping notification to prevent duplicates`);
+        return;
       }
       
       const faction1 = match.teams.faction1.name;
@@ -96,6 +95,9 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
 
         // Store thread reference for this match using the database service
         await this.db.addMatchThread(match.match_id, thread.id, 'upcoming');
+        
+        // Invalidate cache since we just added a new thread
+        this.invalidateMatchCache(match.match_id);
         
         // Send a simple RSVP status message to the thread
         await this.sendSimpleRsvpMessage(thread, match);
@@ -319,27 +321,12 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         return;
       }
 
-      console.log(`🔍 Checking for existing finished match thread for match ${match.match_id}`);  
-
-      // Enhanced duplicate check - check both database and memory cache
-      const hasThreadInDB = await this.db.hasFinishedMatchThread(match.match_id);
-      const hasThreadInMemory = this.db.matchThreads.has(match.match_id);
-      
-      if (hasThreadInDB) {
-        console.log(`⚠️ Finished match thread already exists in database for match ${match.match_id}`);
+      // Check if any thread already exists for this match (the main check should have been done in checkMatches)
+      // This is a safety check in case this method is called directly - use fresh query for safety
+      const hasAnyThread = await this.db.hasAnyMatchThread(match.match_id);
+      if (hasAnyThread) {
+        console.log(`⚠️ Thread already exists for match ${match.match_id}, skipping finished thread creation`);
         return;
-      }
-      
-      if (hasThreadInMemory) {
-        // Double-check if the thread in memory is actually a finished thread
-        const threadId = this.db.matchThreads.get(match.match_id);
-        const threadData = await this.db.db.getThreadsByType('finished');
-        const isFinishedThread = threadData.some(t => t.match_id === match.match_id && t.thread_id === threadId);
-        
-        if (isFinishedThread) {
-          console.log(`⚠️ Finished match thread already exists in memory cache for match ${match.match_id}`);
-          return;
-        }
       }
 
       // Save finished match data to database before creating thread
@@ -415,6 +402,9 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       // Store thread reference using the database service FIRST with enhanced logging
       console.log(`💾 Saving finished match thread to database: ${match.match_id} -> ${thread.id}`);
       await this.db.addMatchThread(match.match_id, thread.id, 'finished');
+      
+      // Invalidate cache since we just added a new thread
+      this.invalidateMatchCache(match.match_id);
       
       // Verify the thread was actually saved with enhanced verification
       const savedThread = await this.db.hasFinishedMatchThread(match.match_id);
@@ -631,11 +621,171 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
   }
 
   /**
+   * Reconcile existing Discord threads with the database
+   */
+  async reconcileExistingThreads() {
+    try {
+      console.log('🔄 Reconciling existing threads...');
+      
+      const channel = this.client.channels.cache.get(config.discord.channelId);
+      if (!channel || !channel.threads) {
+        console.error('Could not access channel threads to reconcile');
+        return;
+      }
+      
+      // Fetch active threads
+      const activeThreads = await channel.threads.fetchActive();
+      
+      // Fetch ALL archived threads (with pagination)
+      const allArchivedThreads = new Map();
+      let hasMoreArchived = true;
+      let archivedBefore = null;
+      
+      while (hasMoreArchived) {
+        const archivedBatch = await channel.threads.fetchArchived({ before: archivedBefore });
+        
+        // Add this batch to our collection
+        archivedBatch.threads.forEach((thread, id) => {
+          allArchivedThreads.set(id, thread);
+        });
+        
+        // Check if there are more archived threads to fetch
+        hasMoreArchived = archivedBatch.hasMore;
+        if (hasMoreArchived && archivedBatch.threads.size > 0) {
+          // Set the 'before' parameter to the last thread ID for pagination
+          const lastThread = Array.from(archivedBatch.threads.values()).pop();
+          archivedBefore = lastThread.id;
+        }
+      }
+      
+      const allThreads = [...activeThreads.threads.values(), ...allArchivedThreads.values()];
+      console.log(`📋 Found ${activeThreads.threads.size} active and ${allArchivedThreads.size} archived threads`);
+      
+      let reconciledCount = 0;
+      const foundMatchIds = new Set();
+      
+      for (const thread of allThreads) {
+        // Check if thread is match-related based on name pattern
+        if (this.isMatchThread(thread.name)) {
+          const matchId = await this.extractMatchIdFromThread(thread);
+          if (matchId) {
+            console.log(`Found match thread: ${thread.name} -> Match ID: ${matchId}`);
+            foundMatchIds.add(matchId);
+            
+            // Check if this thread is already tracked in database (any type)
+            const hasAnyThreadInDB = await this.db.hasAnyMatchThread(matchId);
+            
+            if (!hasAnyThreadInDB) {
+              console.log(`Restoring thread reference for match ID: ${matchId}`);
+              
+              // Determine thread type based on name
+              const threadType = thread.name.startsWith('RESULT:') ? 'finished' : 'upcoming';
+              await this.db.addMatchThread(matchId, thread.id, threadType);
+              reconciledCount++;
+            } else {
+              console.log(`Thread already tracked for match ID: ${matchId}`);
+            }
+          } else {
+            console.warn(`⚠️ Could not extract match ID from thread: ${thread.name}`);
+          }
+        }
+      }
+      
+      // Reverse check: find database entries that don't have corresponding Discord threads
+      console.log('🔍 Checking for stale database thread references...');
+      const dbThreads = await this.db.db.getAllMatchThreads();
+      let staleCount = 0;
+      
+      for (const dbThread of dbThreads) {
+        if (!foundMatchIds.has(dbThread.match_id)) {
+          console.log(`⚠️ Database has thread for match ${dbThread.match_id} (${dbThread.thread_id}) but no corresponding Discord thread found`);
+          
+          // Try to fetch the thread directly to confirm it doesn't exist
+          try {
+            const thread = await this.client.channels.fetch(dbThread.thread_id);
+            if (thread) {
+              console.log(`✅ Thread ${dbThread.thread_id} exists but was missed in reconciliation`);
+            }
+          } catch (err) {
+            console.log(`🗑️ Thread ${dbThread.thread_id} no longer exists, removing from database`);
+            await this.db.removeMatchThread(dbThread.match_id);
+            staleCount++;
+          }
+        }
+      }
+      
+      console.log(`✅ Thread reconciliation complete - restored ${reconciledCount} thread references, cleaned ${staleCount} stale references`);
+
+    } catch (err) {
+      console.error(`Error during thread reconciliation: ${err.message}`);
+    }
+  }
+
+  /**
+   * Check if a thread name indicates it's a match thread
+   */
+  isMatchThread(threadName) {
+    return threadName.startsWith('INCOMING:') || threadName.startsWith('RESULT:');
+  }
+
+  /**
+   * Extract match ID from thread messages (look for Match ID in footer or embeds)
+   */
+  async extractMatchIdFromThread(thread) {
+    try {
+      // Fetch the first few messages from the thread
+      const messages = await thread.messages.fetch({ limit: 5 });
+      
+      for (const message of messages.values()) {
+        // Look for Match ID in embed footer or description
+        if (message.embeds && message.embeds.length > 0) {
+          const embed = message.embeds[0];
+          
+          // Check footer for Match ID
+          if (embed.footer && embed.footer.text && embed.footer.text.includes('Match ID:')) {
+            const matchId = embed.footer.text.replace('Match ID: ', '').trim();
+            if (matchId) {
+              return matchId;
+            }
+          }
+          
+          // Check description for Match ID pattern
+          if (embed.description) {
+            const matchIdMatch = embed.description.match(/Match ID: ([a-f0-9-]+)/i);
+            if (matchIdMatch) {
+              return matchIdMatch[1];
+            }
+          }
+        }
+        
+        // Also check message content for Match ID
+        if (message.content && message.content.includes('Match ID:')) {
+          const matchIdMatch = message.content.match(/Match ID: ([a-f0-9-]+)/i);
+          if (matchIdMatch) {
+            return matchIdMatch[1];
+          }
+        }
+      }
+      
+      return null;
+    } catch (err) {
+      console.error(`Error extracting match ID from thread ${thread.name}: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
    * Check for new matches and send notifications, also check for finished matches
    */
   async checkMatches(faceitService) {
     try {
       console.log('🔄 Checking for new matches and finished matches...');
+      
+      // Reset session cache at the start of each check cycle
+      this.resetSessionCache();
+      
+      // Reconcile existing threads with database (especially important after backup restoration)
+      await this.reconcileExistingThreads();
       
       // Periodically clean up stale thread references (every 10th check)
       if (!this.lastCleanupCheck) this.lastCleanupCheck = 0;
@@ -649,8 +799,13 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       const matches = await faceitService.getUpcomingMatches();
       console.log(`Found ${matches.length} upcoming matches`);
       
+      // Track all matches we should have threads for
+      const allMatchesRequiringThreads = [];
+      
       if (matches.length > 0) {
         for (const match of matches) {
+          allMatchesRequiringThreads.push({ match, type: 'upcoming' });
+          
           if (!this.db.isMatchProcessed(match.match_id)) {
             console.log(`New match found: ${match.match_id}`);
             await this.sendMatchNotification(match);
@@ -673,8 +828,10 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
         
         for (const match of finishedMatches) {
           try {
-            // Check if we already have a finished match thread for this match
-            const hasThread = await this.db.hasFinishedMatchThread(match.match_id);
+            allMatchesRequiringThreads.push({ match, type: 'finished' });
+            
+            // Check if we already have a finished match thread for this match (using cache)
+            const hasThread = await this.hasFinishedMatchThreadCached(match.match_id);
             
             if (!hasThread) {
               console.log(`Creating finished match thread for: ${match.match_id}`);
@@ -698,13 +855,23 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
         }
       }
       
+      // ENHANCED: Check all current matches to ensure they have proper threads
+      console.log('🔍 Verifying all matches have proper threads...');
+      await this.ensureAllMatchThreadsExist(allMatchesRequiringThreads);
+      
       // Check for finished match threads that need to be locked (72+ hours old)
       // Pass the finished matches data to avoid duplicate API calls
       await this.lockOldFinishedMatchThreads(faceitService, finishedMatches);
       
       console.log('✅ Match check completed');
+      
+      // Clear session cache after each check cycle to ensure fresh data next time
+      this.clearSessionCache();
+      
     } catch (err) {
       console.error(`Error during match check: ${err.message}`);
+      // Clear session cache on error too
+      this.clearSessionCache();
     }
   }
 
@@ -1104,6 +1271,265 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
     } catch (err) {
       console.error(`Error creating RSVP chart: ${err.message}`);
       return '```\nError loading RSVP status\n```';
+    }
+  }
+
+  /**
+   * Ensure all current matches have proper threads (create missing ones)
+   */
+  async ensureAllMatchThreadsExist(allMatches) {
+    try {
+      let createdThreads = 0;
+      
+      for (const { match, type } of allMatches) {
+        try {
+          // Check if this match has ANY thread in the database (using cache)
+          const hasAnyThread = await this.hasAnyMatchThreadCached(match.match_id);
+          
+          if (!hasAnyThread) {
+            console.log(`⚠️ Match ${match.match_id} has no thread in database, checking Discord...`);
+            
+            // Double-check by looking for the thread in Discord directly
+            const existingThread = await this.findMatchThreadInDiscord(match.match_id);
+            
+            if (existingThread) {
+              console.log(`✅ Found existing Discord thread for match ${match.match_id}: ${existingThread.name}`);
+              // Restore the database reference
+              const threadType = existingThread.name.startsWith('RESULT:') ? 'finished' : 'upcoming';
+              await this.db.addMatchThread(match.match_id, existingThread.id, threadType);
+              console.log(`💾 Restored database reference for ${threadType} thread: ${match.match_id}`);
+            } else {
+              console.log(`🆕 Creating missing ${type} thread for match ${match.match_id}`);
+              
+              // Create the appropriate thread type
+              if (type === 'upcoming') {
+                // Force create upcoming thread (bypass normal duplicate check)
+                await this.createMissingUpcomingThread(match);
+              } else if (type === 'finished') {
+                await this.createFinishedMatchThread(match);
+              }
+              
+              createdThreads++;
+              
+              // Small delay to avoid rate limiting
+              await new Promise(resolve => setTimeout(resolve, 1000));
+            }
+          }
+        } catch (matchErr) {
+          console.error(`Error ensuring thread exists for match ${match.match_id}: ${matchErr.message}`);
+        }
+      }
+      
+      if (createdThreads > 0) {
+        console.log(`✅ Created ${createdThreads} missing match threads`);
+      } else {
+        console.log('All matches have proper threads');
+      }
+      
+    } catch (err) {
+      console.error(`Error ensuring all match threads exist: ${err.message}`);
+    }
+  }
+
+  /**
+   * Find a match thread in Discord by searching for the match ID
+   */
+  async findMatchThreadInDiscord(matchId) {
+    try {
+      const channel = this.client.channels.cache.get(config.discord.channelId);
+      if (!channel || !channel.threads) {
+        return null;
+      }
+      
+      // Fetch active threads
+      const activeThreads = await channel.threads.fetchActive();
+      
+      // Search active threads first
+      for (const thread of activeThreads.threads.values()) {
+        if (this.isMatchThread(thread.name)) {
+          const extractedMatchId = await this.extractMatchIdFromThread(thread);
+          if (extractedMatchId === matchId) {
+            return thread;
+          }
+        }
+      }
+      
+      // Search recent archived threads (limited search to avoid performance issues)
+      const recentArchived = await channel.threads.fetchArchived({ limit: 50 });
+      for (const thread of recentArchived.threads.values()) {
+        if (this.isMatchThread(thread.name)) {
+          const extractedMatchId = await this.extractMatchIdFromThread(thread);
+          if (extractedMatchId === matchId) {
+            return thread;
+          }
+        }
+      }
+      
+      return null;
+    } catch (err) {
+      console.error(`Error finding match thread in Discord: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Reset session cache at the beginning of a check cycle
+   */
+  resetSessionCache() {
+    console.log('🔄 Resetting session cache for new check cycle');
+    this.queryCache.sessionCache.clear();
+  }
+
+  /**
+   * Clear session cache after check cycle completion
+   */
+  clearSessionCache() {
+    this.queryCache.sessionCache.clear();
+  }
+
+  /**
+   * Get cached result or execute database query with caching
+   */
+  async getCachedQuery(cacheKey, queryFunction, useSessionCache = true) {
+    try {
+      // Check if we should use session cache (for current check cycle only)
+      if (useSessionCache && this.queryCache.sessionCache.has(cacheKey)) {
+        console.log(`📋 Using session cache for: ${cacheKey}`);
+        return this.queryCache.sessionCache.get(cacheKey);
+      }
+      
+      // Check persistent cache (with TTL)
+      if (this.queryCache.matchThreads.has(cacheKey)) {
+        const cachedItem = this.queryCache.matchThreads.get(cacheKey);
+        const cacheAge = Date.now() - cachedItem.timestamp;
+        
+        if (cacheAge < this.queryCache.cacheTTL) {
+          console.log(`💾 Using persistent cache for: ${cacheKey} (age: ${Math.round(cacheAge / 1000)}s)`);
+          
+          // Also store in session cache for faster access during this cycle
+          if (useSessionCache) {
+            this.queryCache.sessionCache.set(cacheKey, cachedItem.result);
+          }
+          
+          return cachedItem.result;
+        } else {
+          // Cache expired, remove it
+          this.queryCache.matchThreads.delete(cacheKey);
+        }
+      }
+      
+      // Execute the query function
+      console.log(`🔍 Executing fresh query for: ${cacheKey}`);
+      const result = await queryFunction();
+      
+      // Store in persistent cache
+      this.queryCache.matchThreads.set(cacheKey, {
+        result: result,
+        timestamp: Date.now()
+      });
+      
+      // Store in session cache if requested
+      if (useSessionCache) {
+        this.queryCache.sessionCache.set(cacheKey, result);
+      }
+      
+      return result;
+      
+    } catch (err) {
+      console.error(`Error in cached query ${cacheKey}: ${err.message}`);
+      throw err;
+    }
+  }
+
+  /**
+   * Invalidate cache for a specific match (when we know data has changed)
+   */
+  invalidateMatchCache(matchId) {
+    console.log(`🗑️ Invalidating cache for match: ${matchId}`);
+    
+    // Remove from persistent cache
+    this.queryCache.matchThreads.delete(`hasAnyThread_${matchId}`);
+    this.queryCache.matchThreads.delete(`hasFinishedThread_${matchId}`);
+    this.queryCache.matchThreads.delete(`hasUpcomingThread_${matchId}`);
+    
+    // Remove from session cache
+    this.queryCache.sessionCache.delete(`hasAnyThread_${matchId}`);
+    this.queryCache.sessionCache.delete(`hasFinishedThread_${matchId}`);
+    this.queryCache.sessionCache.delete(`hasUpcomingThread_${matchId}`);
+  }
+
+  /**
+   * Cached version of hasAnyMatchThread with intelligent caching
+   */
+  async hasAnyMatchThreadCached(matchId) {
+    const cacheKey = `hasAnyThread_${matchId}`;
+    return await this.getCachedQuery(
+      cacheKey,
+      () => this.db.hasAnyMatchThread(matchId),
+      true // Use session cache
+    );
+  }
+
+  /**
+   * Cached version of hasFinishedMatchThread
+   */
+  async hasFinishedMatchThreadCached(matchId) {
+    const cacheKey = `hasFinishedThread_${matchId}`;
+    return await this.getCachedQuery(
+      cacheKey,
+      () => this.db.hasFinishedMatchThread(matchId),
+      true // Use session cache
+    );
+  }
+
+  /**
+   * Create a missing upcoming thread (bypass normal duplication checks)
+   */
+  async createMissingUpcomingThread(match) {
+    try {
+      if (!match || !match.teams || !match.teams.faction1 || !match.teams.faction2) {
+        console.error('Invalid match data for missing upcoming thread creation');
+        return;
+      }
+      
+      const faction1 = match.teams.faction1.name;
+      const faction2 = match.teams.faction2.name;
+      const matchTimes = formatMatchTime(match.scheduled_at);
+      
+      // Store match data for RSVP purposes
+      this.db.upcomingMatches.set(match.match_id, match);
+      
+      const targetChannel = this.client.channels.cache.get(config.discord.channelId);
+      
+      if (targetChannel) {
+        // Create a standalone thread in the channel
+        const thread = await targetChannel.threads.create({
+          name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
+          autoArchiveDuration: 60,
+          type: 11, // GUILD_PUBLIC_THREAD
+          reason: `Restored missing discussion thread for match: ${faction1} vs ${faction2}`
+        });
+
+        // Store thread reference for this match using the database service
+        await this.db.addMatchThread(match.match_id, thread.id, 'upcoming');
+        
+        // Invalidate cache since we just added a new thread
+        this.invalidateMatchCache(match.match_id);
+        
+        // Send a simple RSVP status message to the thread
+        await this.sendSimpleRsvpMessage(thread, match);
+
+        console.log(`✅ Created missing upcoming thread: ${thread.name}`);
+        
+        return thread;
+      } else {
+        console.error('Could not find target channel for missing upcoming thread');
+        return null;
+      }
+      
+    } catch (err) {
+      console.error(`Error creating missing upcoming thread: ${err.message}`);
+      return null;
     }
   }
 }
