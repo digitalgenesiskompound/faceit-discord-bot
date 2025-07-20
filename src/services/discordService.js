@@ -942,8 +942,17 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
           const matchData = await this.db.db.getMatch(threadRecord.match_id);
           
           if (!matchData) {
-            console.log(`No match data found for thread ${threadRecord.thread_id}, skipping`);
+            console.log(`⚠️ No match data found for thread ${threadRecord.thread_id} (match: ${threadRecord.match_id})`);
+            console.log(`This is likely a thread created before the database persistence fix.`);
+            
+            // Option: Use thread creation time as fallback for legacy threads
+            // For now, we'll skip these threads to avoid locking them incorrectly
+            console.log(`⏭️ Skipping legacy thread without match data: ${thread.name}`);
             continue;
+            
+            // Future enhancement: Could use Discord thread creation time as fallback
+            // const threadCreationTime = thread.createdTimestamp;
+            // if (threadCreationTime && threadCreationTime < cutoffTime) { ... }
           }
           
           // Use match finish time (finished_at) instead of thread creation time
