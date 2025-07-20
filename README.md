@@ -71,7 +71,7 @@ The bot now uses Discord bot functionality instead of webhooks. If you were usin
 - **Check logs**: `docker compose logs bot`
 - **Restart**: `docker compose restart bot` 
 - **Update**: Pull changes, then run `docker compose up -d --build`
-- **Reset processed matches**: `echo "[]" > ./data/processed_matches.json && docker compose restart bot`
+- **Reset processed matches**: Use database commands or restart the bot to clear cache
 - **Check health**: Visit `http://localhost:8080/health`
 
 ## How It Works
