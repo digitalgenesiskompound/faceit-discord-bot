@@ -88,7 +88,7 @@ class DiscordService {
         
         // Create a standalone thread in the channel (not attached to the message)
         const thread = await targetChannel.threads.create({
-          name: `Match Discussion: ${faction1} vs ${faction2}`,
+name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
           autoArchiveDuration: 60,
           type: 11, // GUILD_PUBLIC_THREAD
           reason: `Discussion thread for match: ${faction1} vs ${faction2}`
@@ -187,7 +187,68 @@ class DiscordService {
       // Get match data for context
       const match = this.db.upcomingMatches.get(matchId);
       if (!match) {
-        console.log(`Match ${matchId} not found in database`);
+        console.log(`Match ${matchId} not found in upcomingMatches cache, attempting simplified update`);
+        
+        // Try to update with limited information by finding existing message
+        const messages = await thread.messages.fetch({ limit: 10 });
+        const rsvpMessage = messages.find(msg => 
+          msg.author.id === this.client.user.id && 
+          msg.embeds.length > 0 && 
+          msg.embeds[0].title && 
+          msg.embeds[0].title.includes('RSVP Status')
+        );
+        
+        if (rsvpMessage) {
+          // Extract existing information from the message
+          const existingEmbed = rsvpMessage.embeds[0];
+          const existingTitle = existingEmbed.title;
+          const existingDescription = existingEmbed.description;
+          
+          // Get updated RSVP status
+          const rsvpStatus = this.createDynamicRsvpStatus(matchId);
+          
+          // Update just the RSVP section in the description
+          const descriptionParts = existingDescription.split('**Current RSVPs:**\n');
+          let updatedDescription = existingDescription;
+          if (descriptionParts.length === 2) {
+            updatedDescription = descriptionParts[0] + '**Current RSVPs:**\n' + rsvpStatus;
+          } else {
+            // Fallback - append RSVP status
+            updatedDescription = existingDescription + '\n\n**Current RSVPs:**\n' + rsvpStatus;
+          }
+          
+          const updatedEmbed = new EmbedBuilder()
+            .setTitle(existingTitle)
+            .setDescription(updatedDescription)
+            .setColor(existingEmbed.color || 0x1e88e5)
+            .setTimestamp()
+            .setFooter({ text: `Match ID: ${matchId}` });
+          
+          // Create updated button row
+          const rsvpRow = new ActionRowBuilder()
+            .addComponents(
+              new ButtonBuilder()
+                .setCustomId(`rsvp_yes_${matchId}`)
+                .setLabel('✅ Attending')
+                .setStyle(ButtonStyle.Success),
+              new ButtonBuilder()
+                .setCustomId(`rsvp_no_${matchId}`)
+                .setLabel('❌ Not Attending')
+                .setStyle(ButtonStyle.Danger),
+              new ButtonBuilder()
+                .setCustomId(`rsvp_status_${matchId}`)
+                .setLabel('📋 View RSVPs')
+                .setStyle(ButtonStyle.Secondary)
+            );
+          
+          await rsvpMessage.edit({ 
+            embeds: [updatedEmbed], 
+            components: [rsvpRow]
+          });
+          console.log(`Updated RSVP message with simplified status for match ${matchId}`);
+        } else {
+          console.log(`RSVP message not found for match ${matchId}, cannot update`);
+        }
         return;
       }
       
@@ -280,6 +341,13 @@ class DiscordService {
         minute: '2-digit',
         timeZone: 'America/Los_Angeles'
       }) : 'Unknown';
+      
+      // Short date for thread title
+      const shortDate = match.finished_at ? new Date(match.finished_at * 1000).toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        timeZone: 'America/Los_Angeles'
+      }) : 'Unknown';
 
       // Get target channel
       const targetChannel = channel || this.client.channels.cache.get(config.discord.channelId);
@@ -290,7 +358,7 @@ class DiscordService {
       }
 
       // Create thread for the finished match
-      const threadName = `${faction1} vs ${faction2} - Match Result`;
+const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       const thread = await targetChannel.threads.create({
         name: threadName,
         autoArchiveDuration: 10080, // 7 days
@@ -298,8 +366,16 @@ class DiscordService {
         reason: `Result thread for finished match: ${faction1} vs ${faction2}`
       });
 
-      // Store thread reference using the database service
+      // Store thread reference using the database service FIRST
       await this.db.addMatchThread(match.match_id, thread.id, 'finished');
+      
+      // Verify the thread was actually saved
+      const savedThread = await this.db.hasFinishedMatchThread(match.match_id);
+      if (!savedThread) {
+        console.error(`Failed to save finished match thread for ${match.match_id}`);
+        return;
+      }
+      console.log(`✅ Successfully saved finished match thread for ${match.match_id}`);
       
       // Create detailed match summary embed
       const summaryEmbed = this.createMatchSummaryEmbed(match, winner, result, matchDate);
@@ -329,21 +405,52 @@ class DiscordService {
     const faction1 = match.teams.faction1.name;
     const faction2 = match.teams.faction2.name;
     const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
-    const isOurTeam = (teamName) => teamName.toLowerCase().includes('our team name'); // Adjust based on your team name
+    
+    // Debug logging
+    console.log(`\n=== MATCH RESULT DEBUG ===`);
+    console.log(`Match ID: ${match.match_id}`);
+    console.log(`Teams: ${faction1} vs ${faction2}`);
+    console.log(`Winner: ${winner}`);
+    console.log(`Our Team ID: ${config.faceit.teamId}`);
+    console.log(`Faction1 ID: ${match.teams.faction1.faction_id}`);
+    console.log(`Faction2 ID: ${match.teams.faction2.faction_id}`);
+    
+    // Determine if a team is ours by checking if it matches our team ID
+    const isOurTeam = (team) => {
+      if (!team || !team.faction_id) return false;
+      const result = team.faction_id === config.faceit.teamId;
+      console.log(`Team ${team.name} (${team.faction_id}) is our team: ${result}`);
+      return result;
+    };
+    
+    // Check which team is ours
+    const isOurTeam1 = isOurTeam(match.teams.faction1);
+    const isOurTeam2 = isOurTeam(match.teams.faction2);
     
     // Determine if we won or lost
     let resultColor = 0x808080; // Default gray
     let resultIcon = '⚪';
     
     if (winner) {
-      if (isOurTeam(winner)) {
+      // Check if the winner is our team by comparing with team objects
+      const isWinnerOurTeam = (isOurTeam1 && winner === faction1) || 
+                               (isOurTeam2 && winner === faction2);
+      
+      console.log(`Is winner our team: ${isWinnerOurTeam}`);
+      
+      if (isWinnerOurTeam) {
         resultColor = 0x00ff00; // Green for win
         resultIcon = '🏆';
+        console.log(`🏆 WE WON! Setting green color`);
       } else {
         resultColor = 0xff0000; // Red for loss
         resultIcon = '💔';
+        console.log(`💔 We lost. Setting red color`);
       }
+    } else {
+      console.log(`⚪ No winner determined. Using gray color`);
     }
+    console.log(`========================\n`);
     
     const embed = new EmbedBuilder()
       .setTitle(`${resultIcon} ${faction1} vs ${faction2} - Match Complete`)
@@ -379,18 +486,36 @@ class DiscordService {
    * Determine match winner from match data
    */
   determineMatchWinner(match) {
-    if (!match.results || !match.results.winner) {
-      return null;
+    // First try to get winner from results.winner field
+    if (match.results && match.results.winner) {
+      const winnerId = match.results.winner;
+      
+      if (match.teams.faction1.faction_id === winnerId) {
+        return match.teams.faction1.name;
+      } else if (match.teams.faction2.faction_id === winnerId) {
+        return match.teams.faction2.name;
+      }
     }
     
-    const winnerId = match.results.winner;
-    
-    if (match.teams.faction1.faction_id === winnerId) {
-      return match.teams.faction1.name;
-    } else if (match.teams.faction2.faction_id === winnerId) {
-      return match.teams.faction2.name;
+    // If no winner field, determine from score
+    if (match.results && match.results.score) {
+      const score = match.results.score;
+      const faction1Score = parseInt(score.faction1 || 0);
+      const faction2Score = parseInt(score.faction2 || 0);
+      
+      console.log(`Determining winner from scores: ${match.teams.faction1.name} ${faction1Score} - ${faction2Score} ${match.teams.faction2.name}`);
+      
+      if (faction1Score > faction2Score) {
+        console.log(`Winner determined from score: ${match.teams.faction1.name}`);
+        return match.teams.faction1.name;
+      } else if (faction2Score > faction1Score) {
+        console.log(`Winner determined from score: ${match.teams.faction2.name}`);
+        return match.teams.faction2.name;
+      }
+      // If scores are equal, it's a tie - no winner
     }
     
+    console.log('Could not determine winner from results.winner or scores');
     return null;
   }
 
@@ -480,6 +605,9 @@ class DiscordService {
       console.log(`Found ${finishedMatches.length} recent finished matches`);
       
       if (finishedMatches.length > 0) {
+        // Clean up any stale finished match thread references before checking
+        await this.cleanupStaleFinishedMatchThreads();
+        
         let createdThreads = 0;
         
         for (const match of finishedMatches) {
@@ -711,6 +839,42 @@ class DiscordService {
   }
 
   /**
+   * Clean up stale finished match thread references
+   */
+  async cleanupStaleFinishedMatchThreads() {
+    try {
+      // Get all finished match threads from database
+      const finishedThreads = await this.db.db.getThreadsByType('finished');
+      
+      if (finishedThreads.length === 0) {
+        return;
+      }
+      
+      let cleanedCount = 0;
+      
+      for (const threadRecord of finishedThreads) {
+        try {
+          const thread = await this.client.channels.fetch(threadRecord.thread_id).catch(() => null);
+          
+          if (!thread) {
+            console.log(`Thread ${threadRecord.thread_id} no longer exists, removing from database`);
+            await this.db.removeMatchThread(threadRecord.match_id);
+            cleanedCount++;
+          }
+        } catch (threadErr) {
+          console.error(`Error checking thread ${threadRecord.thread_id}: ${threadErr.message}`);
+        }
+      }
+      
+      if (cleanedCount > 0) {
+        console.log(`🧹 Cleaned up ${cleanedCount} stale finished match thread references`);
+      }
+    } catch (err) {
+      console.error(`Error cleaning up stale finished match threads: ${err.message}`);
+    }
+  }
+
+  /**
    * Lock finished match threads that are older than 72 hours
    */
   async lockOldFinishedMatchThreads() {
@@ -733,6 +897,7 @@ class DiscordService {
           const thread = await this.client.channels.fetch(threadRecord.thread_id).catch(() => null);
           
           if (!thread) {
+            // Thread cleanup should have been done earlier, but just in case
             console.log(`Thread ${threadRecord.thread_id} no longer exists, removing from database`);
             await this.db.removeMatchThread(threadRecord.match_id);
             continue;

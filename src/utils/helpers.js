@@ -13,7 +13,6 @@ function formatMatchTime(timestamp) {
   // Format for Pacific Time
   const pacificTime = date.toLocaleString('en-US', { 
     timeZone: 'America/Los_Angeles',
-    weekday: 'short',
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
@@ -24,7 +23,6 @@ function formatMatchTime(timestamp) {
   // Format for Mountain Time
   const mountainTime = date.toLocaleString('en-US', { 
     timeZone: 'America/Denver',
-    weekday: 'short',
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
