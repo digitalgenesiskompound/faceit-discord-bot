@@ -459,6 +459,18 @@ class Database {
     return !!result;
   }
 
+  async hasUpcomingMatchThread(matchId) {
+    const query = 'SELECT 1 FROM match_threads WHERE match_id = ? AND thread_type = "upcoming"';
+    const result = await this.get(query, [matchId]);
+    return !!result;
+  }
+
+  async hasAnyMatchThread(matchId) {
+    const query = 'SELECT 1 FROM match_threads WHERE match_id = ?';
+    const result = await this.get(query, [matchId]);
+    return !!result;
+  }
+
   async removeMatchThread(matchId) {
     const query = 'DELETE FROM match_threads WHERE match_id = ?';
     return this.run(query, [matchId]);

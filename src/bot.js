@@ -7,6 +7,7 @@ const config = require('./config/config');
 const DatabaseService = require('./services/databaseService');
 const DiscordService = require('./services/discordService');
 const NotificationService = require('./services/notificationService');
+const BackupService = require('./services/backupService');
 const faceitService = require('./services/faceitService');
 const errorHandler = require('./utils/errorHandler');
 
@@ -26,12 +27,13 @@ class FaceitBot {
 
     // Initialize services
     this.db = new DatabaseService();
+    this.backupService = new BackupService();
     this.discordService = new DiscordService(this.client, this.db);
     this.notificationService = new NotificationService(this.client, this.db);
     
     // Initialize handlers
     this.buttonHandler = new ButtonHandler(this.client, this.db, this.discordService);
-    this.slashCommandHandler = new (require('./handlers/slashCommandHandler'))(this.client, this.db, this.discordService);
+    this.slashCommandHandler = new (require('./handlers/slashCommandHandler'))(this.client, this.db, this.discordService, this.backupService);
 
     // Setup event handlers
     this.setupEventHandlers();
@@ -47,6 +49,9 @@ class FaceitBot {
       console.log(`🔄 Initializing bot services...`);
       
       try {
+        // Check for backup restoration before initializing database
+        await this.checkAndRestoreBackup();
+        
         // Initialize database
         await this.db.initialize();
         console.log('✅ Database service initialized');
@@ -54,6 +59,10 @@ class FaceitBot {
         // Initialize notification service
         this.notificationService.initialize();
         console.log('✅ Notification service initialized');
+        
+        // Initialize backup service
+        await this.backupService.initialize();
+        console.log('✅ Backup service initialized');
         
         // Start scheduled tasks
         this.startScheduledTasks();
@@ -142,6 +151,63 @@ class FaceitBot {
     });
   }
 
+  /**
+   * Check for backup restoration before starting the bot
+   */
+  async checkAndRestoreBackup() {
+    const fs = require('fs').promises;
+    const path = require('path');
+    
+    const restoreOnStart = process.env.RESTORE_BACKUP_ON_START === 'true';
+    const restoreBackupFile = process.env.RESTORE_BACKUP_FILE;
+    
+    if (!restoreOnStart) {
+      console.log('💾 No backup restoration requested');
+      return;
+    }
+    
+    if (!restoreBackupFile) {
+      console.log('⚠️ RESTORE_BACKUP_ON_START=true but no RESTORE_BACKUP_FILE specified');
+      return;
+    }
+    
+    try {
+      console.log(`🔄 Attempting to restore backup: ${restoreBackupFile}`);
+      
+      // Determine backup file path
+      let backupPath;
+      if (path.isAbsolute(restoreBackupFile)) {
+        backupPath = restoreBackupFile;
+      } else {
+        // Assume it's relative to backup directory
+        backupPath = path.join(this.backupService.backupDir, restoreBackupFile);
+      }
+      
+      // Check if backup file exists
+      try {
+        await fs.access(backupPath);
+      } catch (error) {
+        console.error(`❌ Backup file not found: ${backupPath}`);
+        return;
+      }
+      
+      // Restore the backup without creating a pre-restore backup
+      // (since we're doing this at startup)
+      await this.backupService.restoreFromBackup(backupPath, false);
+      
+      console.log('✅ Database restored successfully from backup');
+      console.log('🔄 Clearing restoration environment variables...');
+      
+      // Clear the environment variables to prevent repeated restoration
+      delete process.env.RESTORE_BACKUP_ON_START;
+      delete process.env.RESTORE_BACKUP_FILE;
+      
+    } catch (error) {
+      console.error(`❌ Failed to restore backup: ${error.message}`);
+      console.error('Bot will continue with existing database');
+    }
+  }
+  
   /**
    * Start scheduled tasks using cron
    */
@@ -288,6 +354,11 @@ class FaceitBot {
       if (this.notificationService) {
         console.log('📢 Shutting down notification service...');
         this.notificationService.shutdown();
+      }
+      
+      if (this.backupService) {
+        console.log('💾 Shutting down backup service...');
+        this.backupService.shutdown();
       }
       
       console.log('✅ Bot shutdown complete');

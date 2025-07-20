@@ -195,6 +195,24 @@ class DatabaseService {
     }
   }
 
+  async hasUpcomingMatchThread(matchId) {
+    try {
+      return await this.db.hasUpcomingMatchThread(matchId);
+    } catch (err) {
+      console.error(`Error checking upcoming match thread: ${err.message}`);
+      return false;
+    }
+  }
+
+  async hasAnyMatchThread(matchId) {
+    try {
+      return await this.db.hasAnyMatchThread(matchId);
+    } catch (err) {
+      console.error(`Error checking for any match thread: ${err.message}`);
+      return false;
+    }
+  }
+
   /**
    * Remove a specific match thread reference
    */

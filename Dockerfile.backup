@@ -1,0 +1,94 @@
+# Use the same base as the main bot for consistency
+FROM node:18-alpine
+
+# Install sqlite3 for database operations and curl for health checks
+RUN apk add --no-cache sqlite curl
+
+# Set working directory
+WORKDIR /app
+
+# Create backup directories
+RUN mkdir -p /app/data/backup /app/logs
+
+# Copy package files
+COPY package*.json ./
+
+# Install only production dependencies
+RUN npm ci --only=production && npm cache clean --force
+
+# Copy source code (only backup-related files)
+COPY src/utils ./src/utils
+COPY src/services/backupService.js ./src/services/
+COPY scripts/backup.js ./scripts/
+
+# Create a simple backup script
+RUN cat > /app/scripts/backup.js << 'EOF'
+const BackupService = require('../src/services/backupService');
+const path = require('path');
+
+class StandaloneBackupService {
+  constructor() {
+    this.backupService = new BackupService();
+    // Override paths for container environment
+    this.backupService.dbPath = '/app/data/bot.db';
+    this.backupService.backupDir = '/app/data/backup';
+  }
+
+  async runBackup() {
+    try {
+      console.log('🔄 Starting standalone database backup...');
+      const result = await this.backupService.performBackup('standalone');
+      
+      if (result.success) {
+        console.log(`✅ Backup completed successfully`);
+        console.log(`📁 Size: ${(result.size / 1024 / 1024).toFixed(2)} MB`);
+        console.log(`⏱️ Duration: ${result.duration}ms`);
+        process.exit(0);
+      } else {
+        console.error(`❌ Backup failed: ${result.error}`);
+        process.exit(1);
+      }
+    } catch (error) {
+      console.error('❌ Fatal backup error:', error.message);
+      process.exit(1);
+    }
+  }
+}
+
+// Run backup if called directly
+if (require.main === module) {
+  const service = new StandaloneBackupService();
+  service.runBackup();
+}
+
+module.exports = StandaloneBackupService;
+EOF
+
+# Make script executable
+RUN chmod +x /app/scripts/backup.js
+
+# Create health check script
+RUN cat > /app/healthcheck.sh << 'EOF'
+#!/bin/sh
+# Simple health check - verify backup directory is accessible
+if [ -d "/app/data/backup" ] && [ -r "/app/data/bot.db" ]; then
+    echo "Backup service healthy"
+    exit 0
+else
+    echo "Backup service unhealthy"
+    exit 1
+fi
+EOF
+
+RUN chmod +x /app/healthcheck.sh
+
+# Set proper permissions
+RUN chown -R node:node /app
+USER node
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD ["/app/healthcheck.sh"]
+
+# Default command runs a single backup and exits
+CMD ["node", "/app/scripts/backup.js"]
