@@ -326,6 +326,36 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         return;
       }
 
+      // Save finished match data to database before creating thread
+      // This ensures the match data with finished_at timestamp is available for thread locking logic
+      try {
+        // Determine winner and result for database storage
+        const winner = this.determineMatchWinner(match);
+        const result = this.formatMatchResult(match);
+        
+        // First, add or update the basic match info
+        await this.db.db.addOrUpdateMatch({
+          match_id: match.match_id,
+          teams: match.teams,
+          scheduled_at: match.scheduled_at,
+          competition_name: match.competition_name || 'FACEIT Match',
+          status: 'FINISHED'
+        });
+        
+        // Then update with finished match results
+        await this.db.db.updateMatchResult(
+          match.match_id,
+          result,
+          winner,
+          match.finished_at
+        );
+        
+        console.log(`✅ Saved finished match data to database: ${match.match_id}`);
+      } catch (dbErr) {
+        console.error(`❌ Error saving finished match data to database: ${dbErr.message}`);
+        // Continue with thread creation even if database save fails
+      }
+
       const faction1 = match.teams.faction1.name;
       const faction2 = match.teams.faction2.name;
       const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
