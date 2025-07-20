@@ -1,5 +1,6 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
+const errorHandler = require('./src/utils/errorHandler');
 
 class Database {
   constructor() {
@@ -78,6 +79,7 @@ class Database {
       `CREATE TABLE IF NOT EXISTS match_threads (
         match_id TEXT PRIMARY KEY,
         thread_id TEXT NOT NULL UNIQUE,
+        thread_type TEXT DEFAULT 'upcoming' CHECK (thread_type IN ('upcoming', 'finished')),
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (match_id) REFERENCES matches(match_id) ON DELETE CASCADE
       )`,
@@ -107,48 +109,118 @@ class Database {
     }
 
     console.log('Database tables created successfully');
+    
+    // Run any necessary migrations
+    await this.runMigrations();
   }
 
-  // Generic run method for INSERT, UPDATE, DELETE
+  // Enhanced run method with retry logic for INSERT, UPDATE, DELETE
   async run(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.run(sql, params, function(err) {
-        if (err) {
-          console.error('Database run error:', err.message);
-          reject(err);
-        } else {
-          resolve({ id: this.lastID, changes: this.changes });
+    const operationName = this.extractOperationName(sql);
+    
+    return await errorHandler.databaseOperationWithRetry(
+      () => {
+        return new Promise((resolve, reject) => {
+          this.db.run(sql, params, function(err) {
+            if (err) {
+              errorHandler.logger.error('Database run operation failed', {
+                operation: operationName,
+                sql: sql.substring(0, 100) + '...',
+                error: err.message,
+                code: err.code
+              });
+              reject(err);
+            } else {
+              errorHandler.logger.debug('Database run operation succeeded', {
+                operation: operationName,
+                changes: this.changes,
+                lastID: this.lastID
+              });
+              resolve({ id: this.lastID, changes: this.changes });
+            }
+          });
+        });
+      },
+      {
+        operationName,
+        context: {
+          sql: sql.substring(0, 100) + '...',
+          paramCount: params.length
         }
-      });
-    });
+      }
+    );
   }
 
-  // Generic get method for SELECT (single row)
+  // Enhanced get method with retry logic for SELECT (single row)
   async get(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.get(sql, params, (err, row) => {
-        if (err) {
-          console.error('Database get error:', err.message);
-          reject(err);
-        } else {
-          resolve(row);
+    const operationName = this.extractOperationName(sql) + '_get';
+    
+    return await errorHandler.databaseOperationWithRetry(
+      () => {
+        return new Promise((resolve, reject) => {
+          this.db.get(sql, params, (err, row) => {
+            if (err) {
+              errorHandler.logger.error('Database get operation failed', {
+                operation: operationName,
+                sql: sql.substring(0, 100) + '...',
+                error: err.message,
+                code: err.code
+              });
+              reject(err);
+            } else {
+              errorHandler.logger.debug('Database get operation succeeded', {
+                operation: operationName,
+                hasResult: !!row
+              });
+              resolve(row);
+            }
+          });
+        });
+      },
+      {
+        operationName,
+        context: {
+          sql: sql.substring(0, 100) + '...',
+          paramCount: params.length
         }
-      });
-    });
+      }
+    );
   }
 
-  // Generic all method for SELECT (multiple rows)
+  // Enhanced all method with retry logic for SELECT (multiple rows)
   async all(sql, params = []) {
-    return new Promise((resolve, reject) => {
-      this.db.all(sql, params, (err, rows) => {
-        if (err) {
-          console.error('Database all error:', err.message);
-          reject(err);
-        } else {
-          resolve(rows);
+    const operationName = this.extractOperationName(sql) + '_all';
+    
+    return await errorHandler.databaseOperationWithRetry(
+      () => {
+        return new Promise((resolve, reject) => {
+          this.db.all(sql, params, (err, rows) => {
+            if (err) {
+              errorHandler.logger.error('Database all operation failed', {
+                operation: operationName,
+                sql: sql.substring(0, 100) + '...',
+                error: err.message,
+                code: err.code
+              });
+              reject(err);
+            } else {
+              errorHandler.logger.debug('Database all operation succeeded', {
+                operation: operationName,
+                rowCount: rows?.length || 0
+              });
+              resolve(rows);
+            }
+          });
+        });
+      },
+      {
+        operationName,
+        context: {
+          sql: sql.substring(0, 100) + '...',
+          paramCount: params.length
         }
-      });
-    });
+      }
+    );
   }
 
   // USER MAPPING METHODS
@@ -225,6 +297,16 @@ class Database {
     return this.all(query);
   }
 
+  async getFinishedMatches(limit = 20) {
+    const query = `
+      SELECT * FROM matches 
+      WHERE status = 'FINISHED'
+      ORDER BY finished_at DESC
+      LIMIT ?
+    `;
+    return this.all(query, [limit]);
+  }
+
   async updateMatchResult(matchId, result, winner, finishedAt) {
     const query = `
       UPDATE matches 
@@ -259,10 +341,15 @@ class Database {
     return this.run(query, [matchId, discordId]);
   }
 
+  async getAllRsvpData() {
+    const query = 'SELECT * FROM rsvp_status ORDER BY timestamp';
+    return this.all(query);
+  }
+
   // MATCH THREAD METHODS
-  async addMatchThread(matchId, threadId) {
-    const query = 'INSERT OR REPLACE INTO match_threads (match_id, thread_id) VALUES (?, ?)';
-    return this.run(query, [matchId, threadId]);
+  async addMatchThread(matchId, threadId, threadType = 'upcoming') {
+    const query = 'INSERT OR REPLACE INTO match_threads (match_id, thread_id, thread_type) VALUES (?, ?, ?)';
+    return this.run(query, [matchId, threadId, threadType]);
   }
 
   async getMatchThread(matchId) {
@@ -274,6 +361,22 @@ class Database {
   async getAllMatchThreads() {
     const query = 'SELECT * FROM match_threads';
     return this.all(query);
+  }
+
+  async getThreadsByType(threadType) {
+    const query = 'SELECT * FROM match_threads WHERE thread_type = ?';
+    return this.all(query, [threadType]);
+  }
+
+  async hasFinishedMatchThread(matchId) {
+    const query = 'SELECT 1 FROM match_threads WHERE match_id = ? AND thread_type = "finished"';
+    const result = await this.get(query, [matchId]);
+    return !!result;
+  }
+
+  async removeMatchThread(matchId) {
+    const query = 'DELETE FROM match_threads WHERE match_id = ?';
+    return this.run(query, [matchId]);
   }
 
   // PROCESSED MATCHES METHODS
@@ -332,6 +435,19 @@ class Database {
     `;
     const searchPattern = `%${query}%`;
     return this.all(searchQuery, [searchPattern, query, searchPattern]);
+  }
+
+  // ADMIN CLEAN METHODS
+  async clearAllUserMappings() {
+    console.log('Clearing all user mappings from database...');
+    const query = 'DELETE FROM user_mappings';
+    return this.run(query);
+  }
+
+  async clearAllRsvpData() {
+    console.log('Clearing all RSVP data from database...');
+    const query = 'DELETE FROM rsvp_status';
+    return this.run(query);
   }
 
   // Close database connection
@@ -402,6 +518,41 @@ class Database {
       console.error('Migration error:', error);
       throw error;
     }
+  }
+
+  /**
+   * Run database migrations for schema updates
+   */
+  async runMigrations() {
+    try {
+      // Check if thread_type column exists in match_threads table
+      const tableInfo = await this.all("PRAGMA table_info(match_threads)");
+      const hasThreadTypeColumn = tableInfo.some(column => column.name === 'thread_type');
+      
+      if (!hasThreadTypeColumn) {
+        console.log('Adding thread_type column to match_threads table...');
+        await this.run(`ALTER TABLE match_threads ADD COLUMN thread_type TEXT DEFAULT 'upcoming' CHECK (thread_type IN ('upcoming', 'finished'))`);
+        console.log('Migration completed: Added thread_type column');
+      }
+    } catch (error) {
+      console.error('Migration error:', error.message);
+      // Don't throw here - let the app continue with existing schema
+    }
+  }
+
+  /**
+   * Extract operation name from SQL query for logging
+   */
+  extractOperationName(sql) {
+    const trimmedSql = sql.trim().toUpperCase();
+    if (trimmedSql.startsWith('SELECT')) return 'SELECT';
+    if (trimmedSql.startsWith('INSERT')) return 'INSERT';
+    if (trimmedSql.startsWith('UPDATE')) return 'UPDATE';
+    if (trimmedSql.startsWith('DELETE')) return 'DELETE';
+    if (trimmedSql.startsWith('CREATE')) return 'CREATE';
+    if (trimmedSql.startsWith('DROP')) return 'DROP';
+    if (trimmedSql.startsWith('ALTER')) return 'ALTER';
+    return 'UNKNOWN';
   }
 }
 

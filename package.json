@@ -1,10 +1,11 @@
 {
   "name": "faceit-discord-bot",
-  "version": "1.0.0",
-  "description": "Discord bot for FACEIT match notifications",
-  "main": "match-notifier.js",
+  "version": "2.0.0",
+  "description": "Discord bot for FACEIT match notifications with modular architecture",
+  "main": "src/bot.js",
   "scripts": {
-    "start": "node match-notifier.js",
+    "start": "node src/bot.js",
+    "dev": "node src/bot.js",
     "test": "echo \"No tests specified\""
   },
   "dependencies": {
@@ -12,6 +13,21 @@
     "discord.js": "^14.14.1",
     "dotenv": "^16.3.1",
     "node-cron": "^3.0.2",
-    "sqlite3": "^5.1.6"
+    "sqlite3": "^5.1.6",
+    "winston": "^3.11.0"
+  },
+  "keywords": [
+    "discord",
+    "faceit",
+    "bot",
+    "counter-strike",
+    "esports",
+    "rsvp",
+    "notifications"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "engines": {
+    "node": ">=16.0.0"
   }
 }
