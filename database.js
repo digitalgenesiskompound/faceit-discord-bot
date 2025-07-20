@@ -424,6 +424,15 @@ class Database {
 
   // MATCH THREAD METHODS
   async addMatchThread(matchId, threadId, threadType = 'upcoming') {
+    // For finished matches, ensure we don't create duplicates by checking first
+    if (threadType === 'finished') {
+      const existingThread = await this.hasFinishedMatchThread(matchId);
+      if (existingThread) {
+        console.log(`⚠️ Preventing duplicate finished thread creation for match ${matchId}`);
+        return { changes: 0, duplicate: true };
+      }
+    }
+    
     const query = 'INSERT OR REPLACE INTO match_threads (match_id, thread_id, thread_type) VALUES (?, ?, ?)';
     return this.run(query, [matchId, threadId, threadType]);
   }
