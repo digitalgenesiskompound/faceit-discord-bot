@@ -668,7 +668,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       }
       
       // Check for finished match threads that need to be locked (72+ hours old)
-      await this.lockOldFinishedMatchThreads();
+      await this.lockOldFinishedMatchThreads(faceitService);
       
       console.log('✅ Match check completed');
     } catch (err) {
@@ -907,7 +907,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
   /**
    * Lock finished match threads that are older than 72 hours based on match finish time
    */
-  async lockOldFinishedMatchThreads() {
+  async lockOldFinishedMatchThreads(faceitService) {
     try {
       console.log('🔒 Checking for old finished match threads to lock...');
       
@@ -945,14 +945,20 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
             console.log(`⚠️ No match data found for thread ${threadRecord.thread_id} (match: ${threadRecord.match_id})`);
             console.log(`This is likely a thread created before the database persistence fix.`);
             
-            // Option: Use thread creation time as fallback for legacy threads
-            // For now, we'll skip these threads to avoid locking them incorrectly
-            console.log(`⏭️ Skipping legacy thread without match data: ${thread.name}`);
-            continue;
+            // Try to fetch match data from FACEIT API for legacy threads
+            console.log(`🔍 Attempting to fetch match data from FACEIT API for legacy match: ${threadRecord.match_id}`);
             
-            // Future enhancement: Could use Discord thread creation time as fallback
-            // const threadCreationTime = thread.createdTimestamp;
-            // if (threadCreationTime && threadCreationTime < cutoffTime) { ... }
+            try {
+              // We need access to faceitService here - it should be passed to checkMatches method
+              // For now, skip legacy threads until we have proper FACEIT match finish data
+              console.log(`⏭️ Skipping legacy thread without FACEIT match data: ${thread.name}`);
+              console.log(`Legacy threads will only be locked once we have the actual FACEIT match finish time`);
+              continue;
+            } catch (apiErr) {
+              console.error(`❌ Failed to fetch FACEIT match data for ${threadRecord.match_id}: ${apiErr.message}`);
+              console.log(`⏭️ Skipping legacy thread due to API error: ${thread.name}`);
+              continue;
+            }
           }
           
           // Use match finish time (finished_at) instead of thread creation time
