@@ -4,6 +4,7 @@ const config = require('../config/config');
 const RsvpService = require('./rsvpService');
 const errorHandler = require('../utils/errorHandler');
 const RescheduleHandler = require('../utils/rescheduleHandler');
+const timeSensitiveCache = require('./timeSensitiveCacheService');
 class DiscordService {
   constructor(client, databaseService) {
     this.client = client;
@@ -147,6 +148,9 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         
         // Invalidate cache since we just added a new thread
         this.invalidateMatchCache(match.match_id);
+        
+        // Trigger cache invalidation for thread creation event
+        await timeSensitiveCache.invalidateCacheForEvent('thread_created', match.match_id);
         
         // Send a simple RSVP status message to the thread
         await this.sendSimpleRsvpMessage(thread, match);
@@ -370,12 +374,47 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         return;
       }
 
-      // Check if any thread already exists for this match (the main check should have been done in checkMatches)
-      // This is a safety check in case this method is called directly - use fresh query for safety
+      // CRITICAL: Always use fresh database query, not cached version, to prevent duplicates
+      console.log(`🔍 Checking for existing finished match thread: ${match.match_id}`);
+      const hasFinishedThread = await this.db.hasFinishedMatchThread(match.match_id);
+      if (hasFinishedThread) {
+        console.log(`⚠️ FINISHED thread already exists for match ${match.match_id}, skipping creation`);
+        return;
+      }
+      
+      // Also check for any thread type (upcoming -> finished transition case)
       const hasAnyThread = await this.db.hasAnyMatchThread(match.match_id);
       if (hasAnyThread) {
-        console.log(`⚠️ Thread already exists for match ${match.match_id}, skipping finished thread creation`);
-        return;
+        // Check if it's an upcoming thread that needs to be converted to finished
+        const hasUpcomingThread = await this.db.hasUpcomingMatchThread(match.match_id);
+        if (hasUpcomingThread) {
+          console.log(`🔄 Upcoming thread exists for finished match ${match.match_id}, but not creating duplicate finished thread`);
+          // Note: In a complete implementation, you might want to update the existing thread type
+          // For now, we'll skip creating a new thread to prevent duplicates
+          return;
+        } else {
+          console.log(`⚠️ Non-upcoming thread already exists for match ${match.match_id}, skipping finished thread creation`);
+          return;
+        }
+      }
+      
+      // CRITICAL: Search Discord directly for existing threads with this match ID
+      // This prevents duplicates when database references are stale but threads still exist
+      console.log(`🔍 Searching Discord for existing threads with match ID: ${match.match_id}`);
+      const existingDiscordThread = await this.findMatchThreadInDiscord(match.match_id);
+      if (existingDiscordThread) {
+        console.log(`⚠️ Found existing Discord thread for match ${match.match_id}: "${existingDiscordThread.name}"`);
+        
+        // If it's a RESULT thread, restore the database reference and skip creation
+        if (existingDiscordThread.name.includes('RESULT:')) {
+          console.log(`💾 Restoring database reference for existing RESULT thread: ${match.match_id} -> ${existingDiscordThread.id}`);
+          await this.db.addMatchThread(match.match_id, existingDiscordThread.id, 'finished');
+          console.log(`✅ Restored finished match thread reference, skipping duplicate creation`);
+          return existingDiscordThread;
+        } else {
+          console.log(`⚠️ Found non-RESULT thread for match ${match.match_id}, skipping finished thread creation to prevent confusion`);
+          return;
+        }
       }
 
       // Save finished match data to database before creating thread
@@ -454,6 +493,9 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       
       // Invalidate cache since we just added a new thread
       this.invalidateMatchCache(match.match_id);
+      
+      // Trigger cache invalidation for match finish event
+      await timeSensitiveCache.invalidateCacheForEvent('match_finish', match.match_id);
       
       // Verify the thread was actually saved with enhanced verification
       const savedThread = await this.db.hasFinishedMatchThread(match.match_id);
@@ -877,8 +919,8 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
           try {
             allMatchesRequiringThreads.push({ match, type: 'finished' });
 
-            // Check if we already have a finished match thread for this match (using cache)
-            const hasThread = await this.hasFinishedMatchThreadCached(match.match_id);
+          // Check if we already have a finished match thread for this match (ALWAYS use fresh DB query)
+            const hasThread = await this.db.hasFinishedMatchThread(match.match_id);
 
             if (!hasThread) {
               console.log(`Creating finished match thread for: ${match.match_id}`);
@@ -1335,8 +1377,8 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       
       for (const { match, type } of allMatches) {
         try {
-          // Check if this match has ANY thread in the database (using cache)
-          const hasAnyThread = await this.hasAnyMatchThreadCached(match.match_id);
+          // Check if this match has ANY thread in the database (use fresh DB query for accuracy)
+          const hasAnyThread = await this.db.hasAnyMatchThread(match.match_id);
           
           if (!hasAnyThread) {
             console.log(`⚠️ Match ${match.match_id} has no thread in database, checking Discord...`);

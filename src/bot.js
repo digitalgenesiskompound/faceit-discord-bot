@@ -297,10 +297,21 @@ class FaceitBot {
         console.log('Discord client not ready, skipping cleanup');
       }
     });
+    
+    // Schedule cache verification every 2 hours to ensure consistency
+    cron.schedule('0 */2 * * *', () => {
+      console.log('🔍 Running periodic cache verification...');
+      if (this.client.isReady()) {
+        this.performCacheVerification();
+      } else {
+        console.log('Discord client not ready, skipping cache verification');
+      }
+    });
 
     console.log('📅 Scheduled tasks configured:');
     console.log('   - Match check: Every 30 minutes');
     console.log('   - Data cleanup: Every 6 hours');
+    console.log('   - Cache verification: Every 2 hours');
   }
 
   /**
@@ -332,6 +343,10 @@ class FaceitBot {
   async performCleanup() {
     try {
       await this.db.db.cleanupOldData();
+      await this.db.cleanupOldRsvpData();
+      await this.db.cleanupExpiredApiCache();
+      await this.db.cleanupExpiredCache();
+      await this.db.cleanupExpiredTeamDataCache();
     } catch (error) {
       errorHandler.logger.error('Error during scheduled cleanup', {
         error: error.message,
@@ -350,6 +365,52 @@ class FaceitBot {
           }
         );
       }
+    }
+  }
+  
+  /**
+   * Perform periodic cache verification and synchronization
+   */
+  async performCacheVerification() {
+    try {
+      console.log('🔍 Starting periodic cache verification...');
+      
+      // 1. Verify thread consistency between database and Discord
+      const threadConsistencyResults = await this.discordService.reconcileExistingThreads();
+      
+      // 2. Check RSVP synchronization
+      const rsvpSyncResults = await this.discordService.refreshAllRsvpStatuses(true);
+      
+      // 3. Verify cache health and performance
+      const timeSensitiveCache = require('./src/services/timeSensitiveCacheService');
+      const cacheStatus = await timeSensitiveCache.getCacheStatus();
+      
+      console.log('📊 Cache verification completed:', {
+        rsvpSync: {
+          processed: rsvpSyncResults.processed,
+          updated: rsvpSyncResults.updated,
+          errors: rsvpSyncResults.errors
+        },
+        cacheStatus: {
+          period: cacheStatus.period,
+          proactiveChecking: cacheStatus.isProactiveCheckingEnabled
+        }
+      });
+      
+      // 4. Log verification metrics
+      errorHandler.logger.info('Periodic cache verification completed', {
+        rsvpUpdates: rsvpSyncResults.updated,
+        rsvpErrors: rsvpSyncResults.errors,
+        cachePeriod: cacheStatus.period,
+        timestamp: new Date().toISOString()
+      });
+      
+    } catch (error) {
+      errorHandler.logger.error('Error during cache verification', {
+        error: error.message,
+        stack: error.stack,
+        timestamp: new Date().toISOString()
+      });
     }
   }
 

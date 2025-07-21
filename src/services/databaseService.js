@@ -170,6 +170,14 @@ class DatabaseService {
         faceit_nickname: faceitNickname,
         timestamp: new Date().toISOString()
       };
+      
+      // Trigger cache invalidation for RSVP update
+      try {
+        const timeSensitiveCache = require('./timeSensitiveCacheService');
+        await timeSensitiveCache.invalidateCacheForEvent('rsvp_update', matchId);
+      } catch (cacheErr) {
+        console.warn(`Failed to invalidate cache for RSVP update: ${cacheErr.message}`);
+      }
     });
   }
 

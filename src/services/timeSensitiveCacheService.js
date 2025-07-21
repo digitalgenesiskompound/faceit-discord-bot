@@ -63,45 +63,92 @@ class TimeSensitiveCacheService {
   }
   
   /**
-   * Determine current cache period based on upcoming matches
+   * Determine current cache period based on upcoming matches with enhanced timing analysis
    */
   async getCurrentCachePeriod() {
     try {
       const now = Date.now() / 1000; // Unix timestamp
       
-      // Get upcoming matches from cache (don't trigger a full refresh here)
+      console.log(`⏰ Analyzing match timing at ${new Date(now * 1000).toISOString()}`);
+      
+      // Get upcoming matches from cache AND database for comprehensive analysis
       const upcomingMatches = await this.getUpcomingMatchesFromCache();
+      const finishedMatches = await this.getRecentFinishedMatchesFromCache();
       
-      if (!upcomingMatches || upcomingMatches.length === 0) {
-        return 'NORMAL_PERIOD';
+      let mostCriticalPeriod = 'NORMAL_PERIOD';
+      let activePeriodDetails = [];
+      
+      // Analyze upcoming matches
+      if (upcomingMatches && upcomingMatches.length > 0) {
+        for (const match of upcomingMatches) {
+          if (!match.scheduled_at) continue;
+          
+          const matchTime = match.scheduled_at;
+          const timeDiff = matchTime - now;
+          const hoursUntilMatch = timeDiff / 3600;
+          
+          console.log(`📅 Match ${match.match_id}: ${match.teams?.faction1?.name} vs ${match.teams?.faction2?.name}`);
+          console.log(`   Scheduled: ${new Date(matchTime * 1000).toISOString()}`);
+          console.log(`   Time until match: ${hoursUntilMatch.toFixed(1)} hours`);
+          
+          // Pre-match period (1 hour before)
+          if (timeDiff <= (this.MATCH_TIME_CONFIG.PRE_MATCH_HOURS * 3600) && timeDiff > 0) {
+            console.log(`   🟡 APPROACHING_MATCH period detected`);
+            mostCriticalPeriod = 'APPROACHING_MATCH';
+            activePeriodDetails.push({
+              type: 'approaching',
+              matchId: match.match_id,
+              timeUntil: hoursUntilMatch
+            });
+          }
+          
+          // Active match period (match time to +2 hours after)
+          if (timeDiff <= 0 && Math.abs(timeDiff) <= (this.MATCH_TIME_CONFIG.ACTIVE_MATCH_DURATION * 3600)) {
+            console.log(`   🔴 ACTIVE_MATCH period detected`);
+            mostCriticalPeriod = 'ACTIVE_MATCH';
+            activePeriodDetails.push({
+              type: 'active',
+              matchId: match.match_id,
+              minutesSinceStart: Math.abs(timeDiff) / 60
+            });
+          }
+        }
       }
       
-      for (const match of upcomingMatches) {
-        const matchTime = match.scheduled_at;
-        const timeDiff = matchTime - now;
-        const timeAfterMatch = now - matchTime;
-        
-        // During match period (match time to +3 hours)
-        if (timeDiff <= 0 && timeAfterMatch <= (this.MATCH_TIME_CONFIG.ACTIVE_MATCH_DURATION * 3600)) {
-          return 'ACTIVE_MATCH';
-        }
-        
-        // Approaching match (2 hours before)
-        if (timeDiff <= (this.MATCH_TIME_CONFIG.PRE_MATCH_HOURS * 3600) && timeDiff > 0) {
-          return 'APPROACHING_MATCH';
-        }
-        
-        // Post-match cooldown (3-6 hours after)
-        const cooldownStart = this.MATCH_TIME_CONFIG.ACTIVE_MATCH_DURATION * 3600;
-        const cooldownEnd = cooldownStart + (this.MATCH_TIME_CONFIG.COOLDOWN_DURATION * 3600);
-        if (timeAfterMatch > cooldownStart && timeAfterMatch <= cooldownEnd) {
-          return 'POST_MATCH_COOLDOWN';
+      // Analyze recently finished matches for post-match cooldown
+      if (finishedMatches && finishedMatches.length > 0) {
+        for (const match of finishedMatches) {
+          if (!match.finished_at) continue;
+          
+          const finishTime = match.finished_at;
+          const timeSinceFinish = now - finishTime;
+          const hoursSinceFinish = timeSinceFinish / 3600;
+          
+          console.log(`🏁 Finished Match ${match.match_id}: finished ${hoursSinceFinish.toFixed(1)} hours ago`);
+          
+          // Post-match cooldown (first 3 hours after finish)
+          if (timeSinceFinish <= (this.MATCH_TIME_CONFIG.COOLDOWN_DURATION * 3600)) {
+            console.log(`   🟠 POST_MATCH_COOLDOWN period detected`);
+            if (mostCriticalPeriod === 'NORMAL_PERIOD') {
+              mostCriticalPeriod = 'POST_MATCH_COOLDOWN';
+            }
+            activePeriodDetails.push({
+              type: 'cooldown',
+              matchId: match.match_id,
+              hoursSinceFinish: hoursSinceFinish
+            });
+          }
         }
       }
       
-      return 'NORMAL_PERIOD';
+      console.log(`🎯 Determined cache period: ${mostCriticalPeriod}`);
+      if (activePeriodDetails.length > 0) {
+        console.log(`📊 Active period details:`, activePeriodDetails);
+      }
+      
+      return mostCriticalPeriod;
     } catch (error) {
-      console.error('Error determining cache period:', error);
+      console.error('❌ Error determining cache period:', error);
       return 'NORMAL_PERIOD';
     }
   }
@@ -131,6 +178,30 @@ class TimeSensitiveCacheService {
   }
   
   /**
+   * Get recent finished matches from cache for post-match analysis
+   */
+  async getRecentFinishedMatchesFromCache() {
+    try {
+      // Try memory cache first
+      const memoryData = this.baseCache.getFromMemoryCache('matches:finished:10');
+      if (memoryData) {
+        return memoryData;
+      }
+      
+      // Try database cache
+      const dbData = await this.baseCache.getFromDatabaseCache('matches:finished:10');
+      if (dbData) {
+        return dbData;
+      }
+      
+      return [];
+    } catch (error) {
+      console.error('Error getting finished matches from cache:', error);
+      return [];
+    }
+  }
+  
+  /**
    * Get dynamic TTL based on current match timing
    */
   async getDynamicTTL(dataType) {
@@ -140,12 +211,30 @@ class TimeSensitiveCacheService {
   }
   
   /**
-   * Check if we should force refresh based on match timing
-   * Removed aggressive force refresh - rely on TTL-based cache expiration
+   * Check if we should force refresh based on match timing and cache invalidation triggers
    */
   async shouldForceRefresh(cacheKey) {
-    // Removed force refresh during active match periods
-    // The shorter TTLs during ACTIVE_MATCH period will handle freshness
+    const period = await this.getCurrentCachePeriod();
+    const lastCacheTime = this.lastCacheTimes.get(cacheKey);
+    
+    // Force refresh during active match periods if cache is older than 2 minutes
+    if (period === 'ACTIVE_MATCH' && lastCacheTime) {
+      const cacheAge = Date.now() - lastCacheTime;
+      if (cacheAge > 2 * 60 * 1000) { // 2 minutes
+        console.log(`🔄 Forcing refresh for ${cacheKey} during ACTIVE_MATCH (cache age: ${Math.round(cacheAge / 1000)}s)`);
+        return true;
+      }
+    }
+    
+    // Force refresh for finished matches during post-match cooldown if cache is older than 5 minutes
+    if (period === 'POST_MATCH_COOLDOWN' && cacheKey.includes('finished') && lastCacheTime) {
+      const cacheAge = Date.now() - lastCacheTime;
+      if (cacheAge > 5 * 60 * 1000) { // 5 minutes
+        console.log(`🔄 Forcing refresh for ${cacheKey} during POST_MATCH_COOLDOWN (cache age: ${Math.round(cacheAge / 1000)}s)`);
+        return true;
+      }
+    }
+    
     return false;
   }
   
@@ -337,6 +426,55 @@ class TimeSensitiveCacheService {
   }
   
   /**
+   * Invalidate cache based on specific events (match start, finish, reschedule)
+   */
+  async invalidateCacheForEvent(eventType, matchId = null) {
+    console.log(`🗑️ Cache invalidation triggered by event: ${eventType}${matchId ? ` (match: ${matchId})` : ''}`);
+    
+    switch (eventType) {
+      case 'match_start':
+        // Clear upcoming matches cache when match starts
+        await this.baseCache.invalidateCache('matches:upcoming');
+        this.lastCacheTimes.delete('matches:upcoming');
+        break;
+        
+      case 'match_finish':
+        // Clear both upcoming and finished matches cache when match finishes
+        await this.baseCache.invalidateCache('matches:upcoming');
+        await this.baseCache.invalidateCache('matches:finished:10');
+        await this.baseCache.invalidateCache('matches:finished:20');
+        this.lastCacheTimes.delete('matches:upcoming');
+        this.lastCacheTimes.delete('matches:finished:10');
+        this.lastCacheTimes.delete('matches:finished:20');
+        break;
+        
+      case 'match_reschedule':
+        // Clear upcoming matches cache when match is rescheduled
+        await this.baseCache.invalidateCache('matches:upcoming');
+        this.lastCacheTimes.delete('matches:upcoming');
+        break;
+        
+      case 'rsvp_update':
+        // No need to invalidate match data caches for RSVP updates
+        // RSVP data is stored separately
+        break;
+        
+      case 'thread_created':
+      case 'thread_updated':
+        // Invalidate relevant caches when threads are created/updated
+        await this.baseCache.invalidateCache('matches:upcoming');
+        break;
+        
+      case 'force_refresh_all':
+        // Force refresh everything
+        await this.forceRefreshMatchData();
+        break;
+    }
+    
+    console.log(`✅ Cache invalidation completed for event: ${eventType}`);
+  }
+  
+  /**
    * Manual cache invalidation for immediate fresh data
    */
   async forceRefreshMatchData() {
@@ -349,6 +487,12 @@ class TimeSensitiveCacheService {
     await this.baseCache.invalidateCache('matches:upcoming');
     await this.baseCache.invalidateCache('matches:finished:10');
     await this.baseCache.invalidateCache('matches:finished:20');
+    await this.baseCache.invalidateCache('team:data');
+    await this.baseCache.invalidateCache('team:players');
+    
+    // Clear memory cache patterns
+    await this.baseCache.invalidateCachePattern('matches:');
+    await this.baseCache.invalidateCachePattern('team:');
     
     console.log('✅ Match data caches cleared - fresh data will be fetched on next request');
   }

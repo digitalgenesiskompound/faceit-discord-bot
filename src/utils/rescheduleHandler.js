@@ -5,6 +5,9 @@ class RescheduleHandler {
   constructor(databaseService, discordService) {
     this.db = databaseService;
     this.discordService = discordService;
+    
+    // Import cache service for invalidation
+    this.timeSensitiveCache = require('../services/timeSensitiveCacheService');
   }
 
   /**
@@ -41,13 +44,17 @@ class RescheduleHandler {
       // 1. Update the cached match data
       this.db.upcomingMatches.set(match.match_id, match);
       
-      // 2. Find and update the existing thread
+      // 2. Invalidate match-related caches due to reschedule
+      await this.timeSensitiveCache.invalidateCacheForEvent('match_reschedule', match.match_id);
+      console.log(`🗑️ Invalidated caches for rescheduled match ${match.match_id}`);
+      
+      // 3. Find and update the existing thread
       const threadId = this.db.matchThreads.get(match.match_id);
       if (threadId) {
         await this.updateThreadForReschedule(threadId, match, rescheduleInfo);
       }
       
-      // 3. Send reschedule notification to the channel
+      // 4. Send reschedule notification to the channel
       await this.sendRescheduleNotification(match, rescheduleInfo);
       
       console.log(`✅ Successfully handled reschedule for match ${match.match_id}`);
