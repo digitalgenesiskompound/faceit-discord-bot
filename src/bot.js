@@ -67,9 +67,15 @@ class FaceitBot {
         this.notificationService.initialize();
         console.log('✅ Notification service initialized');
         
-        // Initialize backup service
-        await this.backupService.initialize();
-        console.log('✅ Backup service initialized');
+        // Initialize backup service (non-blocking)
+        try {
+          await this.backupService.initialize();
+          console.log('✅ Backup service initialized');
+        } catch (error) {
+          console.error('❌ Failed to initialize backup service:', error.message);
+          console.log('⚠️ Bot will continue without backup functionality. Rebuild Docker image to fix backup permissions.');
+          // Don't throw error - let bot continue without backups
+        }
         
         // Start scheduled tasks
         this.startScheduledTasks();
