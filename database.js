@@ -89,6 +89,34 @@ class Database {
         match_id TEXT PRIMARY KEY,
         processed_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (match_id) REFERENCES matches(match_id) ON DELETE CASCADE
+      )`,
+
+      // Match cache table for optimized API data storage
+      `CREATE TABLE IF NOT EXISTS matches_cache (
+        match_id TEXT PRIMARY KEY,
+        match_data TEXT NOT NULL,
+        match_type TEXT NOT NULL CHECK (match_type IN ('upcoming', 'finished', 'championship')),
+        scheduled_at INTEGER,
+        finished_at INTEGER,
+        cache_key TEXT NOT NULL,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        expires_at TIMESTAMP NOT NULL
+      )`,
+
+      // Generic API cache table for all API responses
+      `CREATE TABLE IF NOT EXISTS api_cache (
+        cache_key TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )`,
+
+      // Team data cache table for team/player information
+      `CREATE TABLE IF NOT EXISTS team_data_cache (
+        data_type TEXT PRIMARY KEY,
+        data TEXT NOT NULL,
+        expires_at TIMESTAMP NOT NULL,
+        last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )`
     ];
 
@@ -101,7 +129,12 @@ class Database {
       'CREATE INDEX IF NOT EXISTS idx_rsvp_match_id ON rsvp_status(match_id)',
       'CREATE INDEX IF NOT EXISTS idx_rsvp_discord_id ON rsvp_status(discord_id)',
       'CREATE INDEX IF NOT EXISTS idx_matches_status ON matches(status)',
-      'CREATE INDEX IF NOT EXISTS idx_matches_scheduled_at ON matches(scheduled_at)'
+      'CREATE INDEX IF NOT EXISTS idx_matches_scheduled_at ON matches(scheduled_at)',
+      'CREATE INDEX IF NOT EXISTS idx_matches_cache_expires ON matches_cache(expires_at)',
+      'CREATE INDEX IF NOT EXISTS idx_matches_cache_type ON matches_cache(match_type)',
+      'CREATE INDEX IF NOT EXISTS idx_matches_cache_key ON matches_cache(cache_key)',
+      'CREATE INDEX IF NOT EXISTS idx_api_cache_expires ON api_cache(expires_at)',
+      'CREATE INDEX IF NOT EXISTS idx_team_data_cache_expires ON team_data_cache(expires_at)'
     ];
 
     for (const query of indexes) {
@@ -519,7 +552,293 @@ class Database {
     `;
     await this.run(oldProcessedQuery, [sevenDaysAgo]);
 
+    // Clean up expired cache entries
+    const expiredMatchesCacheQuery = 'DELETE FROM matches_cache WHERE expires_at < datetime("now")';
+    await this.run(expiredMatchesCacheQuery);
+    
+    const expiredApiCacheQuery = 'DELETE FROM api_cache WHERE expires_at < datetime("now")';
+    await this.run(expiredApiCacheQuery);
+    
+    const expiredTeamDataCacheQuery = 'DELETE FROM team_data_cache WHERE expires_at < datetime("now")';
+    await this.run(expiredTeamDataCacheQuery);
+    
     console.log('Database cleanup completed');
+  }
+
+  // MATCHES CACHE METHODS
+  /**
+   * Store match data in cache
+   */
+  async setCacheEntry(matchId, matchData, matchType, cacheKey, ttlMinutes = 30) {
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+    const query = `
+      INSERT OR REPLACE INTO matches_cache 
+      (match_id, match_data, match_type, scheduled_at, finished_at, cache_key, last_updated, expires_at)
+      VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+    `;
+    
+    const scheduledAt = matchData.scheduled_at || null;
+    const finishedAt = matchData.finished_at || null;
+    
+    return this.run(query, [
+      matchId,
+      JSON.stringify(matchData),
+      matchType,
+      scheduledAt,
+      finishedAt,
+      cacheKey,
+      expiresAt
+    ]);
+  }
+
+  /**
+   * Retrieve cached match data
+   */
+  async getCacheEntry(matchId) {
+    const query = `
+      SELECT * FROM matches_cache 
+      WHERE match_id = ? AND expires_at > datetime("now")
+    `;
+    const result = await this.get(query, [matchId]);
+    
+    if (result) {
+      try {
+        return {
+          ...result,
+          match_data: JSON.parse(result.match_data)
+        };
+      } catch (error) {
+        console.error('Error parsing cached match data:', error);
+        // Remove corrupted cache entry
+        await this.removeCacheEntry(matchId);
+        return null;
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Get cached entries by cache key
+   */
+  async getCacheEntriesByKey(cacheKey) {
+    const query = `
+      SELECT * FROM matches_cache 
+      WHERE cache_key = ? AND expires_at > datetime("now")
+      ORDER BY last_updated DESC
+    `;
+    const results = await this.all(query, [cacheKey]);
+    
+    return results.map(result => {
+      try {
+        return {
+          ...result,
+          match_data: JSON.parse(result.match_data)
+        };
+      } catch (error) {
+        console.error('Error parsing cached match data:', error);
+        return null;
+      }
+    }).filter(Boolean);
+  }
+
+  /**
+   * Get cached entries by type
+   */
+  async getCacheEntriesByType(matchType) {
+    const query = `
+      SELECT * FROM matches_cache 
+      WHERE match_type = ? AND expires_at > datetime("now")
+      ORDER BY last_updated DESC
+    `;
+    const results = await this.all(query, [matchType]);
+    
+    return results.map(result => {
+      try {
+        return {
+          ...result,
+          match_data: JSON.parse(result.match_data)
+        };
+      } catch (error) {
+        console.error('Error parsing cached match data:', error);
+        return null;
+      }
+    }).filter(Boolean);
+  }
+
+  /**
+   * Remove specific cache entry
+   */
+  async removeCacheEntry(matchId) {
+    const query = 'DELETE FROM matches_cache WHERE match_id = ?';
+    return this.run(query, [matchId]);
+  }
+
+  /**
+   * Remove all cache entries for a specific key
+   */
+  async removeCacheEntriesByKey(cacheKey) {
+    const query = 'DELETE FROM matches_cache WHERE cache_key = ?';
+    return this.run(query, [cacheKey]);
+  }
+
+  /**
+   * Clean up expired cache entries
+   */
+  async cleanupExpiredCache() {
+    const query = 'DELETE FROM matches_cache WHERE expires_at < datetime("now")';
+    const result = await this.run(query);
+    console.log(`Cleaned up ${result.changes} expired cache entries`);
+    return result;
+  }
+
+  /**
+   * Get cache statistics
+   */
+  async getCacheStats() {
+    const queries = {
+      total: 'SELECT COUNT(*) as count FROM matches_cache',
+      active: 'SELECT COUNT(*) as count FROM matches_cache WHERE expires_at > datetime("now")',
+      expired: 'SELECT COUNT(*) as count FROM matches_cache WHERE expires_at <= datetime("now")',
+      byType: 'SELECT match_type, COUNT(*) as count FROM matches_cache WHERE expires_at > datetime("now") GROUP BY match_type'
+    };
+    
+    const stats = {
+      total: (await this.get(queries.total)).count,
+      active: (await this.get(queries.active)).count,
+      expired: (await this.get(queries.expired)).count,
+      byType: await this.all(queries.byType)
+    };
+    
+    return stats;
+  }
+
+  // API CACHE METHODS
+  /**
+   * Store generic API response in cache
+   */
+  async setApiCache(cacheKey, data, ttlMinutes = 30) {
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+    const query = `
+      INSERT OR REPLACE INTO api_cache 
+      (cache_key, data, expires_at, created_at)
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    `;
+    
+    return this.run(query, [
+      cacheKey,
+      JSON.stringify(data),
+      expiresAt
+    ]);
+  }
+
+  /**
+   * Retrieve cached API response
+   */
+  async getApiCache(cacheKey) {
+    const query = `
+      SELECT * FROM api_cache 
+      WHERE cache_key = ? AND expires_at > datetime("now")
+    `;
+    const result = await this.get(query, [cacheKey]);
+    
+    if (result) {
+      try {
+        return {
+          ...result,
+          data: JSON.parse(result.data)
+        };
+      } catch (error) {
+        console.error('Error parsing cached API data:', error);
+        // Remove corrupted cache entry
+        await this.removeApiCache(cacheKey);
+        return null;
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Remove specific API cache entry
+   */
+  async removeApiCache(cacheKey) {
+    const query = 'DELETE FROM api_cache WHERE cache_key = ?';
+    return this.run(query, [cacheKey]);
+  }
+
+  /**
+   * Clean up expired API cache entries
+   */
+  async cleanupExpiredApiCache() {
+    const query = 'DELETE FROM api_cache WHERE expires_at < datetime("now")';
+    const result = await this.run(query);
+    console.log(`Cleaned up ${result.changes} expired API cache entries`);
+    return result;
+  }
+
+  // TEAM DATA CACHE METHODS
+  /**
+   * Store team data in cache
+   */
+  async setTeamDataCache(dataType, data, ttlMinutes = 240) { // Default 4 hours
+    const expiresAt = new Date(Date.now() + ttlMinutes * 60 * 1000).toISOString();
+    const query = `
+      INSERT OR REPLACE INTO team_data_cache 
+      (data_type, data, expires_at, last_updated)
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+    `;
+    
+    return this.run(query, [
+      dataType,
+      JSON.stringify(data),
+      expiresAt
+    ]);
+  }
+
+  /**
+   * Retrieve cached team data
+   */
+  async getTeamDataCache(dataType) {
+    const query = `
+      SELECT * FROM team_data_cache 
+      WHERE data_type = ? AND expires_at > datetime("now")
+    `;
+    const result = await this.get(query, [dataType]);
+    
+    if (result) {
+      try {
+        return {
+          ...result,
+          data: JSON.parse(result.data)
+        };
+      } catch (error) {
+        console.error('Error parsing cached team data:', error);
+        // Remove corrupted cache entry
+        await this.removeTeamDataCache(dataType);
+        return null;
+      }
+    }
+    
+    return null;
+  }
+
+  /**
+   * Remove specific team data cache entry
+   */
+  async removeTeamDataCache(dataType) {
+    const query = 'DELETE FROM team_data_cache WHERE data_type = ?';
+    return this.run(query, [dataType]);
+  }
+
+  /**
+   * Clean up expired team data cache entries
+   */
+  async cleanupExpiredTeamDataCache() {
+    const query = 'DELETE FROM team_data_cache WHERE expires_at < datetime("now")';
+    const result = await this.run(query);
+    console.log(`Cleaned up ${result.changes} expired team data cache entries`);
+    return result;
   }
 
   // SEARCH METHODS

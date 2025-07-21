@@ -1,17 +1,33 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const config = require('../config/config');
+const rateLimiter = require('../utils/rateLimiter');
 
 class ButtonHandler {
-  constructor(client, databaseService, discordService) {
+  constructor(client, databaseService, discordService, slashCommandHandler = null) {
     this.client = client;
     this.db = databaseService;
     this.discordService = discordService;
+    this.slashCommandHandler = slashCommandHandler;
   }
 
   /**
    * Handle button interactions
    */
   async handleButtonInteraction(interaction) {
+    // Handle registration buttons
+    if (interaction.customId.startsWith('register_')) {
+      if (!this.slashCommandHandler) {
+        await interaction.reply({
+          content: '❌ Registration handler not available. Please try again.',
+          ephemeral: true
+        });
+        return;
+      }
+      await this.slashCommandHandler.handleRegistrationButton(interaction);
+      return;
+    }
+
+    // Handle RSVP buttons
     if (!interaction.customId.startsWith('rsvp_')) {
       return;
     }
@@ -24,6 +40,9 @@ class ButtonHandler {
       
       // Handle status button
       if (response === 'status') {
+        // Refresh RSVP status for just this specific match (much faster)
+        await this.discordService.updateThreadRsvpStatusAsync(matchId);
+        // Then handle status button
         await this.handleStatusButton(interaction, matchId);
         return;
       }
@@ -38,7 +57,7 @@ class ButtonHandler {
       const userMapping = this.db.getUserMappingByDiscordId(userId);
       if (!userMapping) {
         await interaction.reply({ 
-          content: '❌ You must be linked to a FACEIT account to RSVP. Use `/register` to see available players, then `/link <nickname>` to link your account. **Note: Nickname is case-sensitive.**',
+          content: '❌ You must be linked to a FACEIT account to RSVP. Use `/register` to link your account with one click, or `/link <nickname>` if needed.',
           ephemeral: true 
         });
         return;
@@ -53,24 +72,20 @@ class ButtonHandler {
       const responseEmoji = response === 'yes' ? '✅' : '❌';
       const actionText = existingRsvp ? 'updated' : 'recorded';
       
-      // Get thread link if available
+      // Get thread link if available (avoid expensive Discord API call)
       let threadLink = '';
       const threadId = this.db.matchThreads.get(matchId);
-      if (threadId) {
-        try {
-          const thread = await this.client.channels.fetch(threadId);
-          if (thread) {
-            threadLink = `\n🔗 [View Match Thread](https://discord.com/channels/${thread.guild.id}/${threadId})`;
-          }
-        } catch (err) {
-          console.log(`Could not fetch thread link for match ${matchId}: ${err.message}`);
-        }
+      if (threadId && interaction.guild?.id) {
+        threadLink = `\n🔗 [View Match Thread](https://discord.com/channels/${interaction.guild.id}/${threadId})`;
       }
       
-      await interaction.reply({ 
-        content: `${responseEmoji} Your RSVP has been ${actionText}! **${userMapping.faceit_nickname}** - ${response.toUpperCase()}${threadLink}`, 
-        ephemeral: true 
-      });
+      // Use rate limiter for interaction replies
+      await rateLimiter.enqueue('interaction', async () => {
+        return await interaction.reply({ 
+          content: `${responseEmoji} Your RSVP has been ${actionText}! **${userMapping.faceit_nickname}** - ${response.toUpperCase()}${threadLink}`, 
+          ephemeral: true 
+        });
+      }, 1); // Higher priority for user responses
       
       // Update thread RSVP status
       await this.discordService.updateThreadRsvpStatusAsync(matchId);
@@ -200,11 +215,14 @@ class ButtonHandler {
             .setStyle(ButtonStyle.Secondary)
         );
       
-      await interaction.reply({ 
-        embeds: [embed], 
-        components: [refreshRow],
-        ephemeral: true 
-      });
+      // Use rate limiter for status responses
+      await rateLimiter.enqueue('interaction', async () => {
+        return await interaction.reply({ 
+          embeds: [embed], 
+          components: [refreshRow],
+          ephemeral: true 
+        });
+      }, 0); // Normal priority
       
     } catch (err) {
       console.error(`Error handling status button: ${err.message}`);

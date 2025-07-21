@@ -10,6 +10,9 @@ const NotificationService = require('./services/notificationService');
 const BackupService = require('./services/backupService');
 const faceitService = require('./services/faceitService');
 const errorHandler = require('./utils/errorHandler');
+const rateLimiter = require('./utils/rateLimiter');
+const { circuitBreakerManager } = require('./utils/circuitBreaker');
+const { performanceMonitor } = require('./utils/performanceMonitor');
 
 // Import handlers
 const ButtonHandler = require('./handlers/buttonHandler');
@@ -32,8 +35,8 @@ class FaceitBot {
     this.notificationService = new NotificationService(this.client, this.db);
     
     // Initialize handlers
-    this.buttonHandler = new ButtonHandler(this.client, this.db, this.discordService);
     this.slashCommandHandler = new (require('./handlers/slashCommandHandler'))(this.client, this.db, this.discordService, this.backupService);
+    this.buttonHandler = new ButtonHandler(this.client, this.db, this.discordService, this.slashCommandHandler);
 
     // Setup event handlers
     this.setupEventHandlers();
@@ -55,6 +58,10 @@ class FaceitBot {
         // Initialize database
         await this.db.initialize();
         console.log('✅ Database service initialized');
+        
+        // Clear all caches on startup
+        await this.clearCachesOnStartup();
+        console.log('✅ Startup cache clearing completed');
         
         // Initialize notification service
         this.notificationService.initialize();
@@ -151,6 +158,62 @@ class FaceitBot {
     });
   }
 
+  /**
+   * Clear all caches on startup (equivalent to /clear-cache command)
+   */
+  async clearCachesOnStartup() {
+    try {
+      console.log('🔄 Clearing all caches on startup...');
+      
+      // Get cache sizes before clearing for logging
+      const beforeStats = {
+        processedMatches: this.db.processedMatches?.length || 0,
+        userMappings: Object.keys(this.db.userMappings || {}).length,
+        rsvpStatus: Object.keys(this.db.rsvpStatus || {}).length,
+        matchThreads: this.db.matchThreads?.size || 0,
+        upcomingMatches: this.db.upcomingMatches?.size || 0,
+        userSearchResults: this.db.userSearchResults?.size || 0
+      };
+      
+      // Clear all in-memory caches
+      if (this.db.processedMatches) this.db.processedMatches = [];
+      if (this.db.userMappings) this.db.userMappings = {};
+      if (this.db.rsvpStatus) this.db.rsvpStatus = {};
+      if (this.db.matchThreads) this.db.matchThreads = new Map();
+      if (this.db.upcomingMatches) this.db.upcomingMatches = new Map();
+      if (this.db.userSearchResults) this.db.userSearchResults = new Map();
+      
+      // Clear database caches (all entries, not just expired)
+      const apiCacheCleared = await this.db.run('DELETE FROM api_cache');
+      const matchesCacheCleared = await this.db.run('DELETE FROM matches_cache');
+      const teamDataCacheCleared = await this.db.run('DELETE FROM team_data_cache');
+      
+      // Also clean up any remaining expired entries from other tables
+      await this.db.cleanupExpiredApiCache();
+      await this.db.cleanupExpiredCache();
+      await this.db.cleanupExpiredTeamDataCache();
+      
+      console.log('💾 Memory cache cleared:', {
+        processedMatches: beforeStats.processedMatches,
+        userMappings: beforeStats.userMappings,
+        rsvpStatus: beforeStats.rsvpStatus,
+        matchThreads: beforeStats.matchThreads,
+        upcomingMatches: beforeStats.upcomingMatches,
+        userSearchResults: beforeStats.userSearchResults
+      });
+      
+      console.log('🗃️ Database cache cleared:', {
+        apiCache: apiCacheCleared.changes,
+        matchesCache: matchesCacheCleared.changes,
+        teamDataCache: teamDataCacheCleared.changes
+      });
+      
+    } catch (error) {
+      console.error('❌ Error clearing caches on startup:', error.message);
+      // Don't throw - allow bot to continue even if cache clearing fails
+    }
+  }
+  
   /**
    * Check for backup restoration before starting the bot
    */
@@ -293,14 +356,34 @@ class FaceitBot {
   startHealthServer() {
     const server = http.createServer((req, res) => {
       if (req.url === '/health') {
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ 
-          status: 'ok', 
+        const healthData = {
+          status: 'ok',
+          timestamp: new Date().toISOString(),
           discord_ready: this.client.isReady(),
           database_ready: this.db.isReady,
           uptime: process.uptime(),
-          version: '3.0.0-slash-commands'
-        }));
+          version: '3.0.0-slash-commands-enhanced',
+          performance: performanceMonitor.getStats(),
+          circuitBreakers: circuitBreakerManager.getAllStatus(),
+          rateLimiter: rateLimiter.getStatus()
+        };
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(healthData, null, 2));
+        return;
+      }
+      
+      if (req.url === '/metrics') {
+        const metrics = {
+          performance: performanceMonitor.getStats(),
+          circuitBreakers: circuitBreakerManager.getAllStatus(),
+          rateLimiter: rateLimiter.getStatus(),
+          memory: process.memoryUsage(),
+          timestamp: new Date().toISOString()
+        };
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(metrics, null, 2));
         return;
       }
       
@@ -350,6 +433,16 @@ class FaceitBot {
         console.log('🏥 Closing health check server...');
         this.healthServer.close();
       }
+      
+      console.log('🚦 Clearing rate limiter queues...');
+      rateLimiter.clear();
+      
+      console.log('🔧 Resetting circuit breakers...');
+      circuitBreakerManager.resetAll();
+      
+      console.log('🔐 Releasing database locks...');
+      const { databaseLockManager } = require('./utils/databaseLock');
+      databaseLockManager.releaseAllLocks();
       
       if (this.notificationService) {
         console.log('📢 Shutting down notification service...');
