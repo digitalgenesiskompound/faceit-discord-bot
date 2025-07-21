@@ -68,7 +68,7 @@ DISCORD_GUILD_ID=your_discord_server_id_here
 ### 3. Deploy
 
 ```bash
-git clone https://github.com/your-repo/faceit-discord-bot.git
+git clone https://github.com/digitalgenesiskompound/faceit-discord-bot.git
 cd faceit-discord-bot
 docker compose up -d
 ```
