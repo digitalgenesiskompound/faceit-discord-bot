@@ -1,5 +1,7 @@
 ## This was *vibe* coded.
 
+<img width="1024" height="1024" alt="faceit-discord" src="https://github.com/user-attachments/assets/28f118bf-b64a-4f18-9656-88caba522a5b" />
+
 # FACEIT Discord Bot
 
 A Discord bot that automatically monitors your FACEIT team's CS2 matches and provides interactive RSVP functionality. Players can link their Discord accounts to FACEIT profiles and get notifications about upcoming matches with one-click attendance confirmation.
