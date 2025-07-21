@@ -1,6 +1,6 @@
 ## This was *vibe* coded.
 
-<img width="1024" height="1024" alt="faceit-discord" src="https://github.com/user-attachments/assets/28f118bf-b64a-4f18-9656-88caba522a5b" />
+<img width="720" height="720" alt="faceit-discord" src="https://github.com/user-attachments/assets/28f118bf-b64a-4f18-9656-88caba522a5b" />
 
 # FACEIT Discord Bot
 
