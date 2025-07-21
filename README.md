@@ -42,7 +42,7 @@ A Discord bot that automatically monitors your FACEIT team's CS2 matches and pro
 **Discord Bot:**
 - Create bot at [Discord Developer Portal](https://discord.com/developers/applications)
 - Copy bot token and application ID
-- Invite bot to server with "Administrator" permissions
+- Invite bot to server with "All Chat" permissions
 - Copy channel ID where you want notifications (enable Developer Mode in Discord)
 - Copy your Discord user ID (for admin commands)
 
