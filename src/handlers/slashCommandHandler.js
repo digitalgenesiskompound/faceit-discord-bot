@@ -1186,18 +1186,23 @@ class SlashCommandHandler {
     try {
       console.log(`User ${interaction.user.tag} clicked registration button for ${nickname}`);
 
-      // Check if user is already linked
-      const existingMapping = await this.db.getUserMappingByDiscordId(userId);
+      // Check if user is already linked - query database directly to avoid cache issues
+      const existingMapping = await this.db.getUserMappingByDiscordIdFromDB(userId);
+      console.log(`🔍 Check user already linked (from DB): ${userId} -> ${existingMapping ? existingMapping.faceit_nickname : 'none'}`);
       if (existingMapping) {
+        console.log(`❌ User ${interaction.user.tag} already linked to ${existingMapping.faceit_nickname}`);
         await interaction.editReply({
           content: `❌ You are already linked to FACEIT account **${existingMapping.faceit_nickname}**. Use \`/unlink\` first if you want to link a different account.`
         });
         return;
       }
 
-      // Check if this FACEIT account is already linked to someone else
-      const existingUser = await this.db.getUserMappingByFaceitId(playerId);
+      // Check if this FACEIT account is already linked to someone else - query database directly
+      console.log(`🔍 Checking if FACEIT ID ${playerId} is already linked to another user (from DB)...`);
+      const existingUser = await this.db.getUserMappingByFaceitIdFromDB(playerId);
+      console.log(`🔍 FACEIT ID ${playerId} existing user check result (from DB):`, existingUser ? { discord_id: existingUser.discord_id, faceit_nickname: existingUser.faceit_nickname } : 'none');
       if (existingUser) {
+        console.log(`❌ FACEIT account ${nickname} (${playerId}) already linked to Discord user ${existingUser.discord_id}`);
         await interaction.editReply({
           content: `❌ FACEIT account **${nickname}** is already linked to another Discord user.`
         });

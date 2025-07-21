@@ -81,6 +81,30 @@ class DatabaseService {
     return this.userMappings[discordId] || null;
   }
 
+  /**
+   * Get user mapping directly from database (bypasses memory cache)
+   */
+  async getUserMappingByDiscordIdFromDB(discordId) {
+    try {
+      return await this.db.getUserMappingByDiscordId(discordId);
+    } catch (err) {
+      console.error(`Error getting user mapping from DB: ${err.message}`);
+      return null;
+    }
+  }
+
+  /**
+   * Get user mapping by FACEIT ID directly from database (bypasses memory cache)
+   */
+  async getUserMappingByFaceitIdFromDB(faceitPlayerId) {
+    try {
+      return await this.db.getUserMappingByFaceitId(faceitPlayerId);
+    } catch (err) {
+      console.error(`Error getting user mapping by FACEIT ID from DB: ${err.message}`);
+      return null;
+    }
+  }
+
   isFaceitAccountMapped(faceitPlayerId) {
     return Object.values(this.userMappings).some(user => user.faceit_player_id === faceitPlayerId);
   }
