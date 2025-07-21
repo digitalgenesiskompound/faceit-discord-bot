@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, MessageFlags } = require('discord.js');
 const { formatMatchTime } = require('../utils/helpers');
 const faceitService = require('../services/faceitService');
 const config = require('../config/config');
@@ -245,7 +245,7 @@ class SlashCommandHandler {
         default:
           await interaction.reply({ 
             content: '❌ Unknown command', 
-            ephemeral: true 
+            flags: MessageFlags.Ephemeral 
           });
       }
     } catch (error) {
@@ -255,7 +255,7 @@ class SlashCommandHandler {
       if (interaction.replied || interaction.deferred) {
         await interaction.editReply({ content: errorMessage });
       } else {
-        await interaction.reply({ content: errorMessage, ephemeral: true });
+        await interaction.reply({ content: errorMessage, flags: MessageFlags.Ephemeral });
       }
     }
   }
@@ -264,7 +264,7 @@ class SlashCommandHandler {
    * Handle /matches command
    */
   async handleMatchesCommand(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       console.log(`User ${interaction.user.tag} requested matches list via slash command`);
@@ -318,7 +318,7 @@ class SlashCommandHandler {
         // Send this match as a message
         const messageData = {
           embeds: [matchEmbed],
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         };
         
         if (buttons.length > 0) {
@@ -337,7 +337,7 @@ class SlashCommandHandler {
       if (matches.length > 3) {
         await interaction.followUp({
           content: `*Showing ${Math.min(matches.length, 3)} of ${matches.length} upcoming matches. Use match threads for additional matches.*`,
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
       }
       
@@ -358,7 +358,7 @@ class SlashCommandHandler {
       if (!mapping) {
         await interaction.reply({
           content: 'You don\'t have a linked FACEIT account. Use `/register` to link your account with one click, or `/link <nickname>` if needed.',
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -374,13 +374,13 @@ class SlashCommandHandler {
         .setColor(0xff5500)
         .setTimestamp();
       
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       
     } catch (err) {
       console.error(`Error handling /profile command: ${err.message}`);
         await interaction.reply({
           content: 'Sorry, there was an error retrieving your profile.',
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
     }
   }
@@ -392,7 +392,7 @@ class SlashCommandHandler {
   async handleLookupCommand(interaction) {
     const query = interaction.options.getString('query');
     
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       console.log(`User ${interaction.user.tag} is searching for: ${query}`);
@@ -444,7 +444,7 @@ class SlashCommandHandler {
       content: matchId 
         ? `📝 Status for match ${matchId} - Feature coming soon!`
         : '📝 Status command - Please specify a match ID',
-      ephemeral: true
+      flags: MessageFlags.Ephemeral
     });
   }
 
@@ -498,7 +498,7 @@ class SlashCommandHandler {
       }
     }
 
-    await interaction.reply({ embeds: [embed], ephemeral: true });
+    await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
   }
 
   /**
@@ -507,7 +507,7 @@ class SlashCommandHandler {
   async handleFinishedMatchesCommand(interaction) {
     const limit = interaction.options.getInteger('limit') || 10;
     
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       const matches = await faceitService.getFinishedMatches(limit);
@@ -560,7 +560,7 @@ class SlashCommandHandler {
       if (existingMapping) {
         await interaction.reply({
           content: `❌ You are already linked to FACEIT account **${existingMapping.faceit_nickname}**. Use \`/unlink\` first if you want to link a different account.`,
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -572,7 +572,7 @@ class SlashCommandHandler {
       if (!exactMatch) {
         await interaction.reply({
           content: `❌ No FACEIT account found with nickname "${nickname}". Please check the spelling (it's case-sensitive) and try again.`,
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -582,7 +582,7 @@ class SlashCommandHandler {
       if (existingUser) {
         await interaction.reply({
           content: `❌ FACEIT account **${nickname}** is already linked to another Discord user.`,
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -607,14 +607,14 @@ class SlashCommandHandler {
         .setColor(0x00ff00)
         .setTimestamp();
 
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       console.log(`Successfully linked ${interaction.user.tag} to FACEIT account ${exactMatch.nickname}`);
 
     } catch (err) {
       console.error(`Error handling /link command: ${err.message}`);
       await interaction.reply({
         content: '❌ Sorry, there was an error linking your account. Please try again later.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
   }
@@ -623,7 +623,7 @@ class SlashCommandHandler {
    * Handle /register command
    */
   async handleRegisterCommand(interaction) {
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       console.log(`User ${interaction.user.tag} requested team registration info`);
@@ -698,7 +698,7 @@ class SlashCommandHandler {
       if (!existingMapping) {
         await interaction.reply({
           content: '❌ You don\'t have a linked FACEIT account.',
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -711,14 +711,14 @@ class SlashCommandHandler {
         .setColor(0x00ff00)
         .setTimestamp();
 
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       console.log(`Successfully unlinked ${interaction.user.tag} from FACEIT account ${existingMapping.faceit_nickname}`);
 
     } catch (err) {
       console.error(`Error handling /unlink command: ${err.message}`);
       await interaction.reply({
         content: '❌ Sorry, there was an error unlinking your account.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
   }
@@ -734,12 +734,12 @@ class SlashCommandHandler {
     if (!isConfiguredAdmin && !hasAdminPerms) {
       await interaction.reply({
         content: '❌ This command requires administrator permissions or being the configured admin.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
       return;
     }
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       const matches = await faceitService.getUpcomingMatches();
@@ -777,7 +777,7 @@ class SlashCommandHandler {
     if (!interaction.member?.permissions.has('MANAGE_CHANNELS')) {
       interaction.reply({
         content: '❌ You need "Manage Channels" permission or be the configured admin to use this command.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
       return false;
     }
@@ -790,7 +790,7 @@ class SlashCommandHandler {
   async handleClearCacheCommand(interaction) {
     if (!this.checkAdminPermissions(interaction)) return;
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       console.log(`User ${interaction.user.tag} requested cache clear`);
@@ -861,7 +861,7 @@ class SlashCommandHandler {
     if (!isConfiguredAdmin && !hasAdminPerms) {
       await interaction.reply({
         content: '❌ You need administrator permissions or be the configured admin to use this command.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
       return;
     }
@@ -871,7 +871,7 @@ class SlashCommandHandler {
 
       await interaction.reply({
         content: '🔄 Restarting bot... The bot will be back online shortly.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
 
       console.log(`Bot restart initiated by ${interaction.user.tag} (${interaction.user.id})`);
@@ -885,7 +885,7 @@ class SlashCommandHandler {
       console.error(`Error handling /restart-bot command: ${err.message}`);
       await interaction.reply({
         content: '❌ Sorry, there was an error trying to restart the bot.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
     }
   }
@@ -896,7 +896,7 @@ class SlashCommandHandler {
   async handleCleanUserMappingsCommand(interaction) {
     if (!this.checkAdminPermissions(interaction)) return;
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       const beforeCount = await this.db.getAllUserMappings();
@@ -923,7 +923,7 @@ class SlashCommandHandler {
   async handleCleanRsvpStatusCommand(interaction) {
     if (!this.checkAdminPermissions(interaction)) return;
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       console.log(`User ${interaction.user.tag} requested RSVP status cleanup and refresh`);
@@ -963,7 +963,7 @@ class SlashCommandHandler {
   async handleCleanupThreadsCommand(interaction) {
     if (!this.checkAdminPermissions(interaction)) return;
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       await this.discordService.cleanupStaleThreads();
@@ -989,7 +989,7 @@ class SlashCommandHandler {
   async handleBackupCreateCommand(interaction) {
     if (!this.checkAdminPermissions(interaction)) return;
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       console.log(`User ${interaction.user.tag} requested manual backup creation`);
@@ -1026,7 +1026,7 @@ class SlashCommandHandler {
   async handleBackupListCommand(interaction) {
     if (!this.checkAdminPermissions(interaction)) return;
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       console.log(`User ${interaction.user.tag} requested backup list`);
@@ -1092,7 +1092,7 @@ class SlashCommandHandler {
   async handleBackupStatusCommand(interaction) {
     if (!this.checkAdminPermissions(interaction)) return;
 
-    await interaction.deferReply({ ephemeral: true });
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
       console.log(`User ${interaction.user.tag} requested backup status`);
@@ -1169,7 +1169,7 @@ class SlashCommandHandler {
     if (customIdParts.length < 3 || customIdParts[0] !== 'register') {
       await interaction.reply({
         content: '❌ Invalid registration button.',
-        ephemeral: true
+        flags: MessageFlags.Ephemeral
       });
       return;
     }
@@ -1187,7 +1187,7 @@ class SlashCommandHandler {
       if (existingMapping) {
         await interaction.reply({
           content: `❌ You are already linked to FACEIT account **${existingMapping.faceit_nickname}**. Use \`/unlink\` first if you want to link a different account.`,
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -1197,7 +1197,7 @@ class SlashCommandHandler {
       if (existingUser) {
         await interaction.reply({
           content: `❌ FACEIT account **${nickname}** is already linked to another Discord user.`,
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -1209,7 +1209,7 @@ class SlashCommandHandler {
       if (!exactMatch) {
         await interaction.reply({
           content: `❌ Could not find player details for **${nickname}**. Please try again or use \`/link ${nickname}\` manually.`,
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -1234,15 +1234,23 @@ class SlashCommandHandler {
         .setColor(0x00ff00)
         .setTimestamp();
 
-      await interaction.reply({ embeds: [embed], ephemeral: true });
+      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
       console.log(`Successfully linked ${interaction.user.tag} to FACEIT account ${exactMatch.nickname} via button`);
 
     } catch (err) {
       console.error(`Error handling registration button: ${err.message}`);
-      await interaction.reply({
-        content: '❌ Sorry, there was an error linking your account. Please try again later.',
-        ephemeral: true
-      });
+      
+      // Only reply if the interaction hasn't been replied to yet
+      if (!interaction.replied && !interaction.deferred) {
+        try {
+          await interaction.reply({
+            content: '❌ Sorry, there was an error linking your account. Please try again later.',
+            flags: MessageFlags.Ephemeral
+          });
+        } catch (replyError) {
+          console.error(`Failed to reply to registration button interaction: ${replyError.message}`);
+        }
+      }
     }
   }
 }
