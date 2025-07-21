@@ -480,7 +480,7 @@ class SlashCommandHandler {
       }
       
       if (canManageChannels || isConfiguredAdmin) {
-        adminCommands.push('`/clear-cache` - Clear memory & database caches');
+        adminCommands.push('`/clear-cache` - Conservative cache cleanup (preserves user data)');
         adminCommands.push('`/clean-user-mappings` - Clean user data');
         adminCommands.push('`/clean-rsvp-status` - Clean RSVP data');
         adminCommands.push('`/cleanup-threads` - Clean old threads');
@@ -805,37 +805,38 @@ class SlashCommandHandler {
         userSearchResults: this.db.userSearchResults?.size || 0
       };
 
-      // Clear all in-memory caches
-      if (this.db.processedMatches) this.db.processedMatches = [];
-      if (this.db.userMappings) this.db.userMappings = {};
-      if (this.db.rsvpStatus) this.db.rsvpStatus = {};
-      if (this.db.matchThreads) this.db.matchThreads = new Map();
+      // Conservative cache clearing - only clear volatile caches
+      // DO NOT clear userMappings or rsvpStatus - these are critical for functionality
       if (this.db.upcomingMatches) this.db.upcomingMatches = new Map();
       if (this.db.userSearchResults) this.db.userSearchResults = new Map();
-
-      // Clear database caches (all entries, not just expired)
-      const apiCacheCleared = await this.db.run('DELETE FROM api_cache');
-      const matchesCacheCleared = await this.db.run('DELETE FROM matches_cache');
-      const teamDataCacheCleared = await this.db.run('DELETE FROM team_data_cache');
       
-      // Also clean up any remaining expired entries from other tables
-      await this.db.cleanupExpiredApiCache();
-      await this.db.cleanupExpiredCache();
-      await this.db.cleanupExpiredTeamDataCache();
+      // Clear match threads temporarily and reload from database to ensure consistency
+      if (this.db.matchThreads) this.db.matchThreads = new Map();
+      await this.db.reloadMatchThreads();
+
+      // Only clean up expired entries from database caches, don't delete everything
+      const expiredApiCacheCleared = await this.db.cleanupExpiredApiCache();
+      const expiredMatchesCacheCleared = await this.db.cleanupExpiredCache();
+      const expiredTeamDataCacheCleared = await this.db.cleanupExpiredTeamDataCache();
 
       const embed = new EmbedBuilder()
-        .setTitle('🔄 Cache Cleared Successfully')
-        .setDescription('All in-memory and database caches have been cleared.')
+        .setTitle('🔄 Cache Management Complete')
+        .setDescription('Conservative cache management completed - critical data preserved.')
         .setColor(0x00ff00)
         .addFields(
           {
-            name: '💾 Memory Cache Stats (Before Clear)',
+            name: '💾 Cache Stats Before',
             value: `Processed Matches: ${beforeStats.processedMatches}\nUser Mappings: ${beforeStats.userMappings}\nRSVP Status: ${beforeStats.rsvpStatus}`,
             inline: false
           },
           {
-            name: '🗃️ Database Cache Cleared',
-            value: `API Cache: ${apiCacheCleared.changes} entries\nMatches Cache: ${matchesCacheCleared.changes} entries\nTeam Data Cache: ${teamDataCacheCleared.changes} entries`,
+            name: '🔄 Actions Taken',
+            value: `Cleared volatile caches (upcoming matches, search results)\nReloaded match threads from database\nCleaned expired database entries only`,
+            inline: false
+          },
+          {
+            name: '🛡️ Data Preserved',
+            value: `User Mappings: ${Object.keys(this.db.userMappings || {}).length}\nRSVP Data: ${Object.keys(this.db.rsvpStatus || {}).length}\nMatch Threads: ${this.db.matchThreads?.size || 0}`,
             inline: false
           }
         )
