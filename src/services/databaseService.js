@@ -1,4 +1,5 @@
 const databaseInstance = require('../../database');
+const { databaseLockManager } = require('../utils/databaseLock');
 
 class DatabaseService {
   constructor() {
@@ -85,29 +86,33 @@ class DatabaseService {
   }
 
   async addUserMapping(discordId, discordUsername, faceitData) {
-    // Add to database
-    await this.db.addUserMapping(discordId, discordUsername, faceitData);
-    
-    // Update memory cache
-    this.userMappings[discordId] = {
-      discord_username: discordUsername,
-      discord_id: discordId,
-      faceit_nickname: faceitData.nickname,
-      faceit_player_id: faceitData.player_id,
-      faceit_skill_level: faceitData.skill_level || 'N/A',
-      faceit_elo: faceitData.faceit_elo || 'N/A',
-      country: faceitData.country || 'Unknown',
-      registered_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
+    return await databaseLockManager.withLock('user_mappings', async () => {
+      // Add to database
+      await this.db.addUserMapping(discordId, discordUsername, faceitData);
+      
+      // Update memory cache
+      this.userMappings[discordId] = {
+        discord_username: discordUsername,
+        discord_id: discordId,
+        faceit_nickname: faceitData.nickname,
+        faceit_player_id: faceitData.player_id,
+        faceit_skill_level: faceitData.skill_level || 'N/A',
+        faceit_elo: faceitData.faceit_elo || 'N/A',
+        country: faceitData.country || 'Unknown',
+        registered_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      };
+    });
   }
 
   async removeUserMapping(discordId) {
-    // Remove from database
-    await this.db.removeUserMapping(discordId);
-    
-    // Update memory cache
-    delete this.userMappings[discordId];
+    return await databaseLockManager.withLock('user_mappings', async () => {
+      // Remove from database
+      await this.db.removeUserMapping(discordId);
+      
+      // Update memory cache
+      delete this.userMappings[discordId];
+    });
   }
 
   findUserByQuery(query) {
@@ -128,18 +133,20 @@ class DatabaseService {
   }
 
   async addRsvp(matchId, discordId, response, faceitNickname) {
-    // Add to database
-    await this.db.addRsvp(matchId, discordId, response, faceitNickname);
-    
-    // Update memory cache
-    if (!this.rsvpStatus[matchId]) {
-      this.rsvpStatus[matchId] = {};
-    }
-    this.rsvpStatus[matchId][discordId] = {
-      response,
-      faceit_nickname: faceitNickname,
-      timestamp: new Date().toISOString()
-    };
+    return await databaseLockManager.withLock(`rsvp_${matchId}`, async () => {
+      // Add to database
+      await this.db.addRsvp(matchId, discordId, response, faceitNickname);
+      
+      // Update memory cache
+      if (!this.rsvpStatus[matchId]) {
+        this.rsvpStatus[matchId] = {};
+      }
+      this.rsvpStatus[matchId][discordId] = {
+        response,
+        faceit_nickname: faceitNickname,
+        timestamp: new Date().toISOString()
+      };
+    });
   }
 
   // Processed matches methods
@@ -342,6 +349,23 @@ class DatabaseService {
     } catch (err) {
       console.error(`Error during cleanup: ${err.message}`);
     }
+  }
+
+  // Database wrapper methods for direct access
+  async run(sql, params = []) {
+    return await this.db.run(sql, params);
+  }
+
+  async cleanupExpiredApiCache() {
+    return await this.db.cleanupExpiredApiCache();
+  }
+
+  async cleanupExpiredCache() {
+    return await this.db.cleanupExpiredCache();
+  }
+
+  async cleanupExpiredTeamDataCache() {
+    return await this.db.cleanupExpiredTeamDataCache();
   }
 }
 

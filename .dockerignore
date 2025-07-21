@@ -97,3 +97,35 @@ Thumbs.db
 Dockerfile
 .dockerignore
 compose.yaml
+docker-compose*.yml
+
+# Database files (mounted as volumes)
+data/
+*.db
+*.sqlite
+*.sqlite3
+backups/
+
+# CI/CD and development files
+.github/
+.gitlab-ci.yml
+*.log
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Documentation
+CHANGELOG.md
+LICENSE
+*.md
+
+# IDE temporary files
+*.swp
+*.swo
+*~
+
+# Build artifacts
+dist/
+build/
+out/

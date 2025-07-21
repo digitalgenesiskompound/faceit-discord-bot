@@ -80,3 +80,5 @@ out/
 .cache/
 public/
 coverage/
+backups/
+.git/

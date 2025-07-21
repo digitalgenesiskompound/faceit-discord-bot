@@ -8,7 +8,7 @@ services:
     env_file: .env
     volumes:
       - ./data:/app/data
-      - ./backups:/app/data/backup  # Mount backup directory (matches BackupService path)
+      - ./backups:/app/backups  # Mount backup directory directly
     ports:
       - "8080:8080"  # Health check endpoint
     environment:
@@ -38,7 +38,7 @@ services:
       - backup  # Only start when backup profile is used
     volumes:
       - ./data:/app/data:ro  # Read-only access to data
-      - ./backups:/app/data/backup  # FIXED: Same path as bot service
+      - ./backups:/app/backups  # Mount backup directory directly
     environment:
       - BACKUP_RETENTION_DAYS=30
       - BACKUP_SCHEDULE="0 */6 * * *"  # Every 6 hours

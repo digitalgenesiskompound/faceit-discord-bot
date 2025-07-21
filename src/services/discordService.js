@@ -1,11 +1,19 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { formatMatchTime } = require('../utils/helpers');
 const config = require('../config/config');
-
+const RsvpService = require('./rsvpService');
+const errorHandler = require('../utils/errorHandler');
+const RescheduleHandler = require('../utils/rescheduleHandler');
 class DiscordService {
   constructor(client, databaseService) {
     this.client = client;
     this.db = databaseService;
+    
+    // Initialize RSVP service for synchronization
+    this.rsvpService = new RsvpService(databaseService, client);
+    
+    // Initialize reschedule handler
+    this.rescheduleHandler = new RescheduleHandler(databaseService, this);
     
     // Query cache to reduce redundant database operations
     this.queryCache = {
@@ -14,6 +22,47 @@ class DiscordService {
       cacheTTL: 5 * 60 * 1000, // 5 minutes TTL for cache
       sessionCache: new Map() // Per-session cache that lasts for one checkMatches cycle
     };
+  }
+  
+  /**
+   * Refresh all RSVP statuses for INCOMING threads (force refresh without cache)
+   * @param {boolean} silent - If true, don't log detailed progress
+   * @returns {Object} Summary of refresh results
+   */
+  async refreshAllRsvpStatuses(silent = false) {
+    try {
+      if (!silent) {
+        console.log('🔄 Starting RSVP status refresh for all INCOMING threads...');
+      }
+      
+      // Clear RSVP cache to force fresh comparisons
+      this.rsvpService.clearRsvpCache();
+      
+      // Use the RSVP service to check and update all threads
+      const results = await this.rsvpService.checkAllIncomingThreadsForMismatches(this);
+      
+      if (!silent) {
+        console.log('\n📊 RSVP Refresh Summary:');
+        console.log(`   Threads processed: ${results.processed}`);
+        console.log(`   Already synchronized: ${results.synchronized}`);
+        console.log(`   Mismatched and updated: ${results.updated}`);
+        console.log(`   Errors: ${results.errors}`);
+        console.log('✅ RSVP status refresh completed');
+      }
+      
+      return results;
+      
+    } catch (error) {
+      console.error('❌ Error refreshing RSVP statuses:', error.message);
+      return {
+        processed: 0,
+        synchronized: 0,
+        mismatched: 0,
+        updated: 0,
+        errors: 1,
+        details: [{ error: error.message }]
+      };
+    }
   }
 
   /**
@@ -620,6 +669,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
     }, 1000);
   }
 
+
   /**
    * Reconcile existing Discord threads with the database
    */
@@ -691,26 +741,18 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
         }
       }
       
-      // Reverse check: find database entries that don't have corresponding Discord threads
-      console.log('🔍 Checking for stale database thread references...');
+      // Clean up stale database references (threads that no longer exist in Discord)
+      console.log('🔍 Cleaning up stale database thread references...');
       const dbThreads = await this.db.db.getAllMatchThreads();
       let staleCount = 0;
       
       for (const dbThread of dbThreads) {
         if (!foundMatchIds.has(dbThread.match_id)) {
-          console.log(`⚠️ Database has thread for match ${dbThread.match_id} (${dbThread.thread_id}) but no corresponding Discord thread found`);
-          
-          // Try to fetch the thread directly to confirm it doesn't exist
-          try {
-            const thread = await this.client.channels.fetch(dbThread.thread_id);
-            if (thread) {
-              console.log(`✅ Thread ${dbThread.thread_id} exists but was missed in reconciliation`);
-            }
-          } catch (err) {
-            console.log(`🗑️ Thread ${dbThread.thread_id} no longer exists, removing from database`);
-            await this.db.removeMatchThread(dbThread.match_id);
-            staleCount++;
-          }
+          console.log(`🗑️ Removing stale database reference for match ${dbThread.match_id} (thread ${dbThread.thread_id})`);
+          await this.db.removeMatchThread(dbThread.match_id);
+          // Invalidate cache since we removed a thread reference
+          this.invalidateMatchCache(dbThread.match_id);
+          staleCount++;
         }
       }
       
@@ -806,7 +848,12 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
         for (const match of matches) {
           allMatchesRequiringThreads.push({ match, type: 'upcoming' });
           
-          if (!this.db.isMatchProcessed(match.match_id)) {
+          // Check for reschedule first (for processed matches)
+          const rescheduleInfo = await this.rescheduleHandler.detectReschedule(match);
+          if (rescheduleInfo.isRescheduled) {
+            console.log(`🔄 Match reschedule detected for ${match.match_id}`);
+            await this.rescheduleHandler.handleReschedule(match, rescheduleInfo);
+          } else if (!this.db.isMatchProcessed(match.match_id)) {
             console.log(`New match found: ${match.match_id}`);
             await this.sendMatchNotification(match);
           }
@@ -819,27 +866,27 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       console.log('🏁 Checking for finished matches...');
       const finishedMatches = await faceitService.getFinishedMatches(10);
       console.log(`Found ${finishedMatches.length} recent finished matches`);
-      
+
       if (finishedMatches.length > 0) {
         // Clean up any stale finished match thread references before checking
         await this.cleanupStaleFinishedMatchThreads();
-        
+
         let createdThreads = 0;
-        
+
         for (const match of finishedMatches) {
           try {
             allMatchesRequiringThreads.push({ match, type: 'finished' });
-            
+
             // Check if we already have a finished match thread for this match (using cache)
             const hasThread = await this.hasFinishedMatchThreadCached(match.match_id);
-            
+
             if (!hasThread) {
               console.log(`Creating finished match thread for: ${match.match_id}`);
               const thread = await this.createFinishedMatchThread(match);
               if (thread) {
                 createdThreads++;
               }
-              
+
               // Small delay to avoid rate limiting
               await new Promise(resolve => setTimeout(resolve, 500));
             }
@@ -847,15 +894,20 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
             console.error(`Error processing finished match ${match.match_id}: ${matchErr.message}`);
           }
         }
-        
+
         if (createdThreads > 0) {
           console.log(`✅ Created ${createdThreads} new finished match threads`);
         } else {
           console.log('No new finished match threads needed');
         }
       }
+
+      // Check all active INCOMING threads for RSVP mismatch and correct
+      console.log('🔄 Synchronizing RSVP status for all INCOMING threads...');
+      const rsvpSyncResults = await this.rsvpService.checkAllIncomingThreadsForMismatches(this);
+      console.log(`Processed ${rsvpSyncResults.processed} matches, updated ${rsvpSyncResults.updated} mismatched RSVPs`);
       
-      // ENHANCED: Check all current matches to ensure they have proper threads
+      // Check all current matches to ensure they have proper threads
       console.log('🔍 Verifying all matches have proper threads...');
       await this.ensureAllMatchThreadsExist(allMatchesRequiringThreads);
       

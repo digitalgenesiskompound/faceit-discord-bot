@@ -9,7 +9,10 @@ const errorHandler = require('../utils/errorHandler');
 class BackupService {
   constructor() {
     this.dbPath = path.join(__dirname, '../../data/bot.db');
-    this.backupDir = path.join(__dirname, '../../data/backup');
+    // Use the backup directory that matches Docker Compose mapping
+    // ./backups (host) -> /app/backups (container)
+    // Clean direct mapping without nested paths
+    this.backupDir = path.join(__dirname, '../../backups');
     this.isBackupRunning = false;
     this.backupInterval = null;
   }
@@ -106,8 +109,8 @@ class BackupService {
       console.log(`📊 Backup size: ${(backupStats.size / 1024 / 1024).toFixed(2)} MB`);
       console.log(`⏱️ Duration: ${duration}ms`);
 
-      // Clean up old backups (keep only last 5 for automatic backups)
-      const keepCount = triggerType === 'manual' ? 10 : 5;
+      // Clean up old backups (keep only last 5 for all backup types)
+      const keepCount = 5;
       await this.cleanupOldBackups(keepCount);
 
       errorHandler.logger.info('Database backup completed successfully', {
@@ -232,7 +235,7 @@ class BackupService {
   /**
    * Clean up old backup files, keeping only the most recent ones
    */
-  async cleanupOldBackups(keepCount = 10) {
+  async cleanupOldBackups(keepCount = 5) {
     try {
       const files = await fs.readdir(this.backupDir);
       const backupFiles = files

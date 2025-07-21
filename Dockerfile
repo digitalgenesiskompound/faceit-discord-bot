@@ -1,25 +1,26 @@
+# Optimized single-stage build for maximum speed
 FROM node:lts-alpine
 
-# Install build dependencies for SQLite3 and curl for health checks
-RUN apk add --no-cache \
-    python3 \
-    make \
-    g++ \
-    curl \
-    sqlite
+# Install only runtime dependencies (no build tools needed)
+RUN apk add --no-cache curl sqlite && \
+    rm -rf /var/cache/apk/*
 
-# Create app directory
 WORKDIR /app
 
-# Install dependencies first (for better caching)
+# Copy package files first for better caching
 COPY package*.json ./
-RUN npm install --only=production
 
-# Copy app source
-COPY . .
+# Install dependencies with optimizations for speed
+# Using npm install for better pre-built binary compatibility
+RUN npm install --only=production --prefer-offline --no-audit --no-fund --silent && \
+    npm cache clean --force
 
-# Create data directory with proper permissions
-RUN mkdir -p /app/data && chown -R node:node /app
+# Copy application source code and database module (changes most frequently, so it's last)
+COPY --chown=node:node src/ ./src/
+COPY --chown=node:node database.js ./database.js
+
+# Create data and logs directories
+RUN mkdir -p /app/data /app/logs && chown -R node:node /app/data /app/logs
 
 # Health check using curl instead of wget
 HEALTHCHECK --interval=60s --timeout=5s --start-period=10s --retries=3 \

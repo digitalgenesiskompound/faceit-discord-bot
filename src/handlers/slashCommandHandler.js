@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
 const { formatMatchTime } = require('../utils/helpers');
 const faceitService = require('../services/faceitService');
 const config = require('../config/config');
@@ -28,10 +28,6 @@ class SlashCommandHandler {
       .setName('profile')
       .setDescription('View your linked FACEIT profile');
 
-    // List players command
-    const listPlayersCommand = new SlashCommandBuilder()
-      .setName('listplayers')
-      .setDescription('List all team players');
 
     // Lookup command
     const lookupCommand = new SlashCommandBuilder()
@@ -130,7 +126,6 @@ class SlashCommandHandler {
     // Store command definitions
     this.commands.set('matches', matchesCommand);
     this.commands.set('profile', profileCommand);
-    this.commands.set('listplayers', listPlayersCommand);
     this.commands.set('lookup', lookupCommand);
     this.commands.set('status', statusCommand);
     this.commands.set('help', helpCommand);
@@ -198,9 +193,6 @@ class SlashCommandHandler {
           break;
         case 'profile':
           await this.handleProfileCommand(interaction);
-          break;
-        case 'listplayers':
-          await this.handleListPlayersCommand(interaction);
           break;
         case 'lookup':
           await this.handleLookupCommand(interaction);
@@ -284,41 +276,70 @@ class SlashCommandHandler {
         return;
       }
       
-      const embed = new EmbedBuilder()
-        .setTitle('🎮 Upcoming FACEIT Matches')
-        .setColor(0x0099ff)
-        .setTimestamp();
+      const guildId = interaction.guild?.id;
       
-      let description = '';
-      
-      // Process matches sequentially to handle async RSVP calls
-      for (let index = 0; index < matches.length; index++) {
+      // Send each match as a separate message for perfect pairing
+      for (let index = 0; index < Math.min(matches.length, 3); index++) { // Limit to 3 matches for clean output
         const match = matches[index];
         const faction1 = match.teams.faction1?.name || 'TBD';
         const faction2 = match.teams.faction2?.name || 'TBD';
         const matchTimes = formatMatchTime(match.scheduled_at);
         const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
         
-        // Check if this match has any RSVPs
-        try {
-          const matchRsvps = this.db.getRsvpForMatch(match.match_id);
-          const rsvpCount = Object.keys(matchRsvps).length;
-          const rsvpIndicator = rsvpCount > 0 ? ` (${rsvpCount} RSVPs)` : '';
-          
-        description += `**${index + 1}.** ${faction1} vs ${faction2}${rsvpIndicator}\n`;
-        } catch (rsvpError) {
-          // If RSVP check fails, continue without RSVP count
-          description += `**${index + 1}.** ${faction1} vs ${faction2}\n`;
+        // Create simple, clean embed for this match
+        const matchEmbed = new EmbedBuilder()
+          .setTitle(`${faction1} vs ${faction2}`)
+          .setDescription(`⏰ ${matchTimes.pacific}\n⏰ ${matchTimes.mountain}`)
+          .setColor(0xff5500); // Orange color like FACEIT
+        
+        // Create action buttons for this match
+        const buttons = [];
+        
+        // Match Room button (always available)
+        buttons.push(
+          new ButtonBuilder()
+            .setLabel('🔗 Join Match Room')
+            .setStyle(ButtonStyle.Link)
+            .setURL(matchUrl)
+        );
+        
+        // Discord Thread button (if thread exists)
+        const threadId = this.db.matchThreads.get(match.match_id);
+        if (threadId && guildId) {
+          const threadUrl = `https://discord.com/channels/${guildId}/${threadId}`;
+          buttons.push(
+            new ButtonBuilder()
+              .setLabel('💬 Go to Thread')
+              .setStyle(ButtonStyle.Link)
+              .setURL(threadUrl)
+          );
         }
         
-        description += `📅 ${matchTimes.pacific} / ${matchTimes.mountain}\n`;
-        description += `🔗 [View Match](${matchUrl})\n`;
-        description += `🆔 Match ID: \`${match.match_id}\`\n\n`;
+        // Send this match as a message
+        const messageData = {
+          embeds: [matchEmbed],
+          ephemeral: true
+        };
+        
+        if (buttons.length > 0) {
+          messageData.components = [new ActionRowBuilder().addComponents(buttons)];
+        }
+        
+        // Use editReply for the first message, followUp for subsequent ones
+        if (index === 0) {
+          await interaction.editReply(messageData);
+        } else {
+          await interaction.followUp(messageData);
+        }
       }
       
-      embed.setDescription(description);
-      
-      await interaction.editReply({ embeds: [embed] });
+      // Add footer message if there are more matches
+      if (matches.length > 3) {
+        await interaction.followUp({
+          content: `*Showing ${Math.min(matches.length, 3)} of ${matches.length} upcoming matches. Use match threads for additional matches.*`,
+          ephemeral: true
+        });
+      }
       
     } catch (err) {
       console.error(`Error handling /matches command: ${err.message}`);
@@ -336,7 +357,7 @@ class SlashCommandHandler {
       const mapping = await this.db.getUserMappingByDiscordId(userId);
       if (!mapping) {
         await interaction.reply({
-          content: 'You don\'t have a linked FACEIT account. Use `/register` to see available players, then `/link <nickname>` to link your account.',
+          content: 'You don\'t have a linked FACEIT account. Use `/register` to link your account with one click, or `/link <nickname>` if needed.',
           ephemeral: true
         });
         return;
@@ -364,38 +385,6 @@ class SlashCommandHandler {
     }
   }
 
-  /**
-   * Handle /listplayers command
-   */
-  async handleListPlayersCommand(interaction) {
-    await interaction.deferReply({ ephemeral: true });
-
-    try {
-      console.log(`User ${interaction.user.tag} requested team players list via slash command`);
-      const players = await faceitService.listTeamPlayers();
-
-      if (players.length === 0) {
-        await interaction.editReply('No players found for your team.');
-        return;
-      }
-
-      const embed = new EmbedBuilder()
-        .setTitle('🎮 Team Players')
-        .setColor(0x0099ff)
-        .setTimestamp();
-
-      players.forEach((player, index) => {
-        embed.addFields({ name: `${index + 1}. ${player.nickname}`, value: `Player ID: ${player.user_id}`, inline: false });
-      });
-
-      await interaction.editReply({ embeds: [embed] });
-      console.log(`Sent ${players.length} team players via slash command to user ${interaction.user.tag}`);
-
-    } catch (err) {
-      console.error(`Error handling /listplayers command: ${err.message}`);
-        await interaction.editReply('Sorry, there was an error fetching the player list.');
-    }
-  }
 
   /**
    * Handle /lookup command
@@ -472,9 +461,10 @@ class SlashCommandHandler {
       .setDescription('Here are the available slash commands:')
       .addFields(
         { name: '🎮 Match Commands', value: '`/matches` - View upcoming matches\n`/finishedmatches [limit]` - View recent results', inline: false },
-        { name: '👤 Profile Commands', value: '`/profile` - View your linked FACEIT profile\n`/register` - See available team players\n`/link <nickname>` - Link your FACEIT account\n`/unlink` - Unlink your FACEIT account', inline: false },
-        { name: '👥 Team Commands', value: '`/listplayers` - List all team players\n`/lookup <query>` - Search FACEIT accounts\n`/status [match_id]` - View RSVP status', inline: false },
-        { name: '❓ Other Commands', value: '`/help` - Show this help message', inline: false }
+        { name: '👤 Profile Commands', value: '`/profile` - View your linked FACEIT profile\n`/register` - Link your account with one click\n`/link <nickname>` - Link manually (if needed)\n`/unlink` - Unlink your FACEIT account', inline: false },
+        { name: '👥 Team Commands', value: '`/lookup <query>` - Search FACEIT accounts\n`/status [match_id]` - View RSVP status', inline: false },
+        { name: '❓ Other Commands', value: '`/help` - Show this help message', inline: false },
+        { name: '💡 Tips', value: '• All responses are private (only you can see them)\n• To clear old messages, refresh Discord or restart the app\n• Use `/register` for the easiest account linking', inline: false }
       )
       .setColor(0x7289da)
       .setTimestamp()
@@ -490,7 +480,7 @@ class SlashCommandHandler {
       }
       
       if (canManageChannels || isConfiguredAdmin) {
-        adminCommands.push('`/clear-cache` - Clear memory caches');
+        adminCommands.push('`/clear-cache` - Clear memory & database caches');
         adminCommands.push('`/clean-user-mappings` - Clean user data');
         adminCommands.push('`/clean-rsvp-status` - Clean RSVP data');
         adminCommands.push('`/cleanup-threads` - Clean old threads');
@@ -637,6 +627,16 @@ class SlashCommandHandler {
 
     try {
       console.log(`User ${interaction.user.tag} requested team registration info`);
+      
+      // Check if user is already linked
+      const existingMapping = await this.db.getUserMappingByDiscordId(interaction.user.id);
+      if (existingMapping) {
+        await interaction.editReply({
+          content: `❌ You are already linked to FACEIT account **${existingMapping.faceit_nickname}**. Use \`/unlink\` first if you want to link a different account.`
+        });
+        return;
+      }
+      
       const players = await faceitService.listTeamPlayers();
 
       if (players.length === 0) {
@@ -644,18 +644,42 @@ class SlashCommandHandler {
         return;
       }
 
-      // Create a simple, clean list of player names
-      const playerList = players.map((player, index) => `${index + 1}. **${player.nickname}**`).join('\n');
-      
       const embed = new EmbedBuilder()
-        .setTitle('📝 Available Team Players')
-        .setDescription(`Here are the team players you can link to:\n\n${playerList}`)
+        .setTitle('📝 Link Your FACEIT Account')
+        .setDescription('Click on your FACEIT nickname below to link your Discord account:')
         .setColor(0xff5500)
-        .setTimestamp()
-        .setFooter({ text: 'Use /link <nickname> to link your account (case-sensitive)' });
+        .setTimestamp();
 
-      await interaction.editReply({ embeds: [embed] });
-      console.log(`Sent registration info with ${players.length} team players to ${interaction.user.tag}`);
+      // Create buttons for each player (max 5 per row, 5 rows max = 25 players)
+      const components = [];
+      const maxButtons = Math.min(players.length, 25); // Discord limit
+      
+      for (let i = 0; i < maxButtons; i += 5) {
+        const rowButtons = [];
+        const rowPlayers = players.slice(i, i + 5);
+        
+        for (const player of rowPlayers) {
+          rowButtons.push(
+            new ButtonBuilder()
+              .setCustomId(`register_${player.user_id}_${player.nickname}`)
+              .setLabel(player.nickname)
+              .setStyle(ButtonStyle.Primary)
+          );
+        }
+        
+        components.push(new ActionRowBuilder().addComponents(rowButtons));
+      }
+      
+      if (players.length > 25) {
+        embed.setFooter({ text: `Showing first 25 of ${players.length} players. Use /link <nickname> for others.` });
+      }
+
+      await interaction.editReply({ 
+        embeds: [embed],
+        components: components
+      });
+      
+      console.log(`Sent registration buttons with ${Math.min(players.length, 25)} team players to ${interaction.user.tag}`);
 
     } catch (err) {
       console.error(`Error handling /register command: ${err.message}`);
@@ -789,15 +813,32 @@ class SlashCommandHandler {
       if (this.db.upcomingMatches) this.db.upcomingMatches = new Map();
       if (this.db.userSearchResults) this.db.userSearchResults = new Map();
 
+      // Clear database caches (all entries, not just expired)
+      const apiCacheCleared = await this.db.run('DELETE FROM api_cache');
+      const matchesCacheCleared = await this.db.run('DELETE FROM matches_cache');
+      const teamDataCacheCleared = await this.db.run('DELETE FROM team_data_cache');
+      
+      // Also clean up any remaining expired entries from other tables
+      await this.db.cleanupExpiredApiCache();
+      await this.db.cleanupExpiredCache();
+      await this.db.cleanupExpiredTeamDataCache();
+
       const embed = new EmbedBuilder()
         .setTitle('🔄 Cache Cleared Successfully')
-        .setDescription('All in-memory caches have been cleared.')
+        .setDescription('All in-memory and database caches have been cleared.')
         .setColor(0x00ff00)
-        .addFields({
-          name: 'Cache Stats Before Clear',
-          value: `Processed Matches: ${beforeStats.processedMatches}\nUser Mappings: ${beforeStats.userMappings}\nRSVP Status: ${beforeStats.rsvpStatus}`,
-          inline: false
-        })
+        .addFields(
+          {
+            name: '💾 Memory Cache Stats (Before Clear)',
+            value: `Processed Matches: ${beforeStats.processedMatches}\nUser Mappings: ${beforeStats.userMappings}\nRSVP Status: ${beforeStats.rsvpStatus}`,
+            inline: false
+          },
+          {
+            name: '🗃️ Database Cache Cleared',
+            value: `API Cache: ${apiCacheCleared.changes} entries\nMatches Cache: ${matchesCacheCleared.changes} entries\nTeam Data Cache: ${teamDataCacheCleared.changes} entries`,
+            inline: false
+          }
+        )
         .setTimestamp();
 
       await interaction.editReply({ embeds: [embed] });
@@ -885,21 +926,34 @@ class SlashCommandHandler {
     await interaction.deferReply({ ephemeral: true });
 
     try {
+      console.log(`User ${interaction.user.tag} requested RSVP status cleanup and refresh`);
+      
+      // Step 1: Clean RSVP database entries
       const beforeCount = await this.db.getAllRsvpData();
       await this.db.clearAllRsvpData();
+      console.log(`Cleaned ${beforeCount.length} RSVP entries from database`);
+      
+      // Step 2: Refresh all RSVP statuses in threads
+      console.log('🔄 Refreshing all RSVP statuses in threads...');
+      const refreshResults = await this.discordService.refreshAllRsvpStatuses(true); // Silent mode
       
       const embed = new EmbedBuilder()
-        .setTitle('✅ RSVP Status Cleaned')
-        .setDescription(`Successfully cleaned ${beforeCount.length} RSVP entries from the database.`)
+        .setTitle('✅ RSVP Status Cleaned and Refreshed')
+        .setDescription(`Successfully cleaned ${beforeCount.length} RSVP entries from the database and refreshed all thread RSVP displays.`)
+        .addFields(
+          { name: '🗑️ Database Cleanup', value: `Removed ${beforeCount.length} RSVP entries`, inline: true },
+          { name: '🔄 Thread Refresh', value: `Processed ${refreshResults.processed} threads\nUpdated ${refreshResults.updated} displays`, inline: true },
+          { name: '📊 Sync Status', value: `Synchronized: ${refreshResults.synchronized}\nErrors: ${refreshResults.errors}`, inline: true }
+        )
         .setColor(0x00ff00)
         .setTimestamp();
 
       await interaction.editReply({ embeds: [embed] });
-      console.log(`Cleaned ${beforeCount.length} RSVP entries by ${interaction.user.tag}`);
+      console.log(`RSVP cleanup and refresh completed by ${interaction.user.tag}: cleaned ${beforeCount.length} entries, processed ${refreshResults.processed} threads`);
 
     } catch (err) {
       console.error(`Error handling /clean-rsvp-status command: ${err.message}`);
-      await interaction.editReply('❌ Sorry, there was an error cleaning RSVP status.');
+      await interaction.editReply('❌ Sorry, there was an error cleaning RSVP status and refreshing threads.');
     }
   }
 
@@ -1102,6 +1156,93 @@ class SlashCommandHandler {
     } catch (err) {
       console.error(`Error handling /backup-status command: ${err.message}`);
       await interaction.editReply('❌ Sorry, there was an error getting backup status.');
+    }
+  }
+
+  /**
+   * Handle registration button clicks
+   * This should be called from your main button handler
+   */
+  async handleRegistrationButton(interaction) {
+    // Parse the custom ID: register_{player_id}_{nickname}
+    const customIdParts = interaction.customId.split('_');
+    if (customIdParts.length < 3 || customIdParts[0] !== 'register') {
+      await interaction.reply({
+        content: '❌ Invalid registration button.',
+        ephemeral: true
+      });
+      return;
+    }
+
+    const playerId = customIdParts[1];
+    const nickname = customIdParts.slice(2).join('_'); // In case nickname has underscores
+    const userId = interaction.user.id;
+    const username = interaction.user.username;
+
+    try {
+      console.log(`User ${interaction.user.tag} clicked registration button for ${nickname}`);
+
+      // Check if user is already linked
+      const existingMapping = await this.db.getUserMappingByDiscordId(userId);
+      if (existingMapping) {
+        await interaction.reply({
+          content: `❌ You are already linked to FACEIT account **${existingMapping.faceit_nickname}**. Use \`/unlink\` first if you want to link a different account.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      // Check if this FACEIT account is already linked to someone else
+      const existingUser = await this.db.getUserMappingByFaceitId(playerId);
+      if (existingUser) {
+        await interaction.reply({
+          content: `❌ FACEIT account **${nickname}** is already linked to another Discord user.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      // Get player details from FACEIT API to ensure we have complete info
+      const playerDetails = await faceitService.searchFaceitAccounts(nickname);
+      const exactMatch = playerDetails.find(player => player.player_id === playerId);
+
+      if (!exactMatch) {
+        await interaction.reply({
+          content: `❌ Could not find player details for **${nickname}**. Please try again or use \`/link ${nickname}\` manually.`,
+          ephemeral: true
+        });
+        return;
+      }
+
+      // Link the account
+      await this.db.addUserMapping(userId, username, {
+        nickname: exactMatch.nickname,
+        player_id: exactMatch.player_id,
+        skill_level: exactMatch.games?.cs2?.skill_level || exactMatch.games?.csgo?.skill_level || 'Unknown',
+        faceit_elo: exactMatch.games?.cs2?.faceit_elo || exactMatch.games?.csgo?.faceit_elo || 'Unknown',
+        country: exactMatch.country || 'Unknown'
+      });
+
+      const embed = new EmbedBuilder()
+        .setTitle('✅ Successfully Linked!')
+        .setDescription(`Your Discord account has been linked to FACEIT account **[${exactMatch.nickname}](https://www.faceit.com/en/players/${exactMatch.nickname})**`)
+        .addFields(
+          { name: '🏆 Skill Level', value: `${exactMatch.games?.cs2?.skill_level || exactMatch.games?.csgo?.skill_level || 'Unknown'}`, inline: true },
+          { name: '🏅 ELO', value: `${exactMatch.games?.cs2?.faceit_elo || exactMatch.games?.csgo?.faceit_elo || 'Unknown'}`, inline: true },
+          { name: '🌍 Country', value: exactMatch.country || 'Unknown', inline: true }
+        )
+        .setColor(0x00ff00)
+        .setTimestamp();
+
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      console.log(`Successfully linked ${interaction.user.tag} to FACEIT account ${exactMatch.nickname} via button`);
+
+    } catch (err) {
+      console.error(`Error handling registration button: ${err.message}`);
+      await interaction.reply({
+        content: '❌ Sorry, there was an error linking your account. Please try again later.',
+        ephemeral: true
+      });
     }
   }
 }
