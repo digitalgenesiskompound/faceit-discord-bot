@@ -1,3 +1,5 @@
+## This was *vibe* coded.
+
 # FACEIT Discord Bot
 
 A Discord bot that automatically monitors your FACEIT team's CS2 matches and provides interactive RSVP functionality. Players can link their Discord accounts to FACEIT profiles and get notifications about upcoming matches with one-click attendance confirmation.
