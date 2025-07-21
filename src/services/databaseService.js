@@ -237,6 +237,26 @@ class DatabaseService {
     }
   }
 
+  /**
+   * Reload match threads from database into memory cache
+   */
+  async reloadMatchThreads() {
+    try {
+      // Clear the current in-memory cache
+      this.matchThreads = new Map();
+      
+      // Reload from database
+      const threadsData = await this.db.getAllMatchThreads();
+      for (const thread of threadsData) {
+        this.matchThreads.set(thread.match_id, thread.thread_id);
+      }
+      
+      console.log(`🔄 Reloaded ${this.matchThreads.size} match thread mappings from database`);
+    } catch (err) {
+      console.error(`Error reloading match threads: ${err.message}`);
+    }
+  }
+
   // Admin methods for data management
   async getAllUserMappings() {
     try {

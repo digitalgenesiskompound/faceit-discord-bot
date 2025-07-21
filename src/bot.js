@@ -208,6 +208,9 @@ class FaceitBot {
         teamDataCache: teamDataCacheCleared.changes
       });
       
+      // Reload match threads from database to ensure thread references are available for RSVP updates
+      await this.db.reloadMatchThreads();
+      
     } catch (error) {
       console.error('❌ Error clearing caches on startup:', error.message);
       // Don't throw - allow bot to continue even if cache clearing fails
