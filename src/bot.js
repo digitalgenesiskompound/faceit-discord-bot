@@ -159,11 +159,11 @@ class FaceitBot {
   }
 
   /**
-   * Clear all caches on startup (equivalent to /clear-cache command)
+   * Conservative cache management on startup - only clear volatile caches, preserve critical data
    */
   async clearCachesOnStartup() {
     try {
-      console.log('🔄 Clearing all caches on startup...');
+      console.log('🔄 Running startup cache management...');
       
       // Get cache sizes before clearing for logging
       const beforeStats = {
@@ -175,45 +175,39 @@ class FaceitBot {
         userSearchResults: this.db.userSearchResults?.size || 0
       };
       
-      // Clear all in-memory caches
-      if (this.db.processedMatches) this.db.processedMatches = [];
-      if (this.db.userMappings) this.db.userMappings = {};
-      if (this.db.rsvpStatus) this.db.rsvpStatus = {};
-      if (this.db.matchThreads) this.db.matchThreads = new Map();
+      // Only clear volatile in-memory caches that should be refreshed
+      // DO NOT clear userMappings or rsvpStatus - these are critical for functionality
       if (this.db.upcomingMatches) this.db.upcomingMatches = new Map();
       if (this.db.userSearchResults) this.db.userSearchResults = new Map();
       
-      // Clear database caches (all entries, not just expired)
-      const apiCacheCleared = await this.db.run('DELETE FROM api_cache');
-      const matchesCacheCleared = await this.db.run('DELETE FROM matches_cache');
-      const teamDataCacheCleared = await this.db.run('DELETE FROM team_data_cache');
+      // Clear match threads temporarily and reload from database to ensure consistency
+      if (this.db.matchThreads) this.db.matchThreads = new Map();
+      await this.db.reloadMatchThreads();
       
-      // Also clean up any remaining expired entries from other tables
+      // Only clean up expired entries from database caches, don't delete everything
       await this.db.cleanupExpiredApiCache();
       await this.db.cleanupExpiredCache();
       await this.db.cleanupExpiredTeamDataCache();
       
-      console.log('💾 Memory cache cleared:', {
-        processedMatches: beforeStats.processedMatches,
-        userMappings: beforeStats.userMappings,
-        rsvpStatus: beforeStats.rsvpStatus,
-        matchThreads: beforeStats.matchThreads,
-        upcomingMatches: beforeStats.upcomingMatches,
-        userSearchResults: beforeStats.userSearchResults
+      console.log('💾 Conservative cache management completed:', {
+        beforeStats,
+        clearedVolatile: {
+          upcomingMatches: beforeStats.upcomingMatches,
+          userSearchResults: beforeStats.userSearchResults
+        },
+        preserved: {
+          userMappings: Object.keys(this.db.userMappings || {}).length,
+          rsvpStatus: Object.keys(this.db.rsvpStatus || {}).length,
+          processedMatches: this.db.processedMatches?.length || 0
+        },
+        reloaded: {
+          matchThreads: this.db.matchThreads?.size || 0
+        }
       });
-      
-      console.log('🗃️ Database cache cleared:', {
-        apiCache: apiCacheCleared.changes,
-        matchesCache: matchesCacheCleared.changes,
-        teamDataCache: teamDataCacheCleared.changes
-      });
-      
-      // Reload match threads from database to ensure thread references are available for RSVP updates
-      await this.db.reloadMatchThreads();
       
     } catch (error) {
-      console.error('❌ Error clearing caches on startup:', error.message);
-      // Don't throw - allow bot to continue even if cache clearing fails
+      console.error('❌ Error during startup cache management:', error.message);
+      // Don't throw - allow bot to continue even if cache management fails
     }
   }
   
