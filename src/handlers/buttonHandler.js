@@ -1,4 +1,4 @@
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const config = require('../config/config');
 const rateLimiter = require('../utils/rateLimiter');
 
@@ -19,7 +19,7 @@ class ButtonHandler {
       if (!this.slashCommandHandler) {
         await interaction.reply({
           content: '❌ Registration handler not available. Please try again.',
-          ephemeral: true
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -49,7 +49,7 @@ class ButtonHandler {
       
       // Handle RSVP yes/no responses
       if (response !== 'yes' && response !== 'no') {
-        await interaction.reply({ content: '❌ Invalid RSVP response.', ephemeral: true });
+        await interaction.reply({ content: '❌ Invalid RSVP response.', flags: MessageFlags.Ephemeral });
         return;
       }
       
@@ -58,7 +58,7 @@ class ButtonHandler {
       if (!userMapping) {
         await interaction.reply({ 
           content: '❌ You must be linked to a FACEIT account to RSVP. Use `/register` to link your account with one click, or `/link <nickname>` if needed.',
-          ephemeral: true 
+          flags: MessageFlags.Ephemeral
         });
         return;
       }
@@ -83,7 +83,7 @@ class ButtonHandler {
       await rateLimiter.enqueue('interaction', async () => {
         return await interaction.reply({ 
           content: `${responseEmoji} Your RSVP has been ${actionText}! **${userMapping.faceit_nickname}** - ${response.toUpperCase()}${threadLink}`, 
-          ephemeral: true 
+          flags: MessageFlags.Ephemeral
         });
       }, 1); // Higher priority for user responses
       
@@ -95,7 +95,7 @@ class ButtonHandler {
     } catch (err) {
       console.error(`Error handling button interaction: ${err.message}`);
       if (!interaction.replied) {
-        await interaction.reply({ content: '❌ Sorry, there was an error processing your RSVP.', ephemeral: true });
+        await interaction.reply({ content: '❌ Sorry, there was an error processing your RSVP.', flags: MessageFlags.Ephemeral });
       }
     }
   }
@@ -220,7 +220,7 @@ class ButtonHandler {
         return await interaction.reply({ 
           embeds: [embed], 
           components: [refreshRow],
-          ephemeral: true 
+          flags: MessageFlags.Ephemeral
         });
       }, 0); // Normal priority
       
@@ -228,7 +228,7 @@ class ButtonHandler {
       console.error(`Error handling status button: ${err.message}`);
       await interaction.reply({ 
         content: '❌ Sorry, there was an error retrieving RSVP status.', 
-        ephemeral: true 
+        flags: MessageFlags.Ephemeral
       });
     }
   }
