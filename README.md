@@ -1,3 +1,8 @@
+## This was *vibe* coded.
+
+<img width="720" height="720" alt="faceit-discord" src="https://github.com/user-attachments/assets/28f118bf-b64a-4f18-9656-88caba522a5b" />
+<img width="720" height="560" alt="Untitled design" src="https://github.com/user-attachments/assets/50082855-6198-49ec-8abc-96b8895d6fd4" />
+
 # FACEIT Discord Bot
 
 A Discord bot that automatically monitors your FACEIT team's CS2 matches and provides interactive RSVP functionality. Players can link their Discord accounts to FACEIT profiles and get notifications about upcoming matches with one-click attendance confirmation.
@@ -36,8 +41,8 @@ A Discord bot that automatically monitors your FACEIT team's CS2 matches and pro
 
 **Discord Bot:**
 - Create bot at [Discord Developer Portal](https://discord.com/developers/applications)
-- Copy bot token and application ID
-- Invite bot to server with "Administrator" permissions
+- Copy bot token and bot client ID
+- Invite bot to server with "All Chat" permissions
 - Copy channel ID where you want notifications (enable Developer Mode in Discord)
 - Copy your Discord user ID (for admin commands)
 
@@ -63,7 +68,8 @@ DISCORD_GUILD_ID=your_discord_server_id_here
 ### 3. Deploy
 
 ```bash
-git clone https://github.com/your-repo/faceit-discord-bot.git
+- Copy bot token and bot client ID
+- Invite bot to server with "All Chat" permissions
 cd faceit-discord-bot
 docker compose up -d
 ```
