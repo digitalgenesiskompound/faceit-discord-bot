@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: faceit-discord-bot
     restart: unless-stopped
+    user: "${UID:-1000}:${GID:-1000}"  # Run as host user to match file permissions
     env_file: .env
     volumes:
       - ./data:/app/data
