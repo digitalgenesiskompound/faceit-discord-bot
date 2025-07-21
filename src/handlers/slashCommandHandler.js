@@ -1,4 +1,4 @@
-const { SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, MessageFlags } = require('discord.js');
+const { SlashCommandBuilder, EmbedBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder, MessageFlags, PermissionFlagsBits } = require('discord.js');
 const { formatMatchTime } = require('../utils/helpers');
 const faceitService = require('../services/faceitService');
 const config = require('../config/config');
@@ -452,8 +452,8 @@ class SlashCommandHandler {
    * Handle /help command
    */
   async handleHelpCommand(interaction) {
-    const isAdmin = interaction.member?.permissions.has('ADMINISTRATOR');
-    const canManageChannels = interaction.member?.permissions.has('MANAGE_CHANNELS');
+    const isAdmin = interaction.member?.permissions.has(PermissionFlagsBits.Administrator);
+    const canManageChannels = interaction.member?.permissions.has(PermissionFlagsBits.ManageChannels);
     const isConfiguredAdmin = config.adminDiscordId && interaction.user.id === config.adminDiscordId;
 
     const embed = new EmbedBuilder()
@@ -729,7 +729,7 @@ class SlashCommandHandler {
   async handleNotifyCommand(interaction) {
     // Check if user is the configured admin or has admin permissions
     const isConfiguredAdmin = config.adminDiscordId && interaction.user.id === config.adminDiscordId;
-    const hasAdminPerms = interaction.member?.permissions.has('ADMINISTRATOR');
+    const hasAdminPerms = interaction.member?.permissions.has(PermissionFlagsBits.Administrator);
     
     if (!isConfiguredAdmin && !hasAdminPerms) {
       await interaction.reply({
@@ -774,7 +774,7 @@ class SlashCommandHandler {
     }
     
     // Fall back to Discord permissions
-    if (!interaction.member?.permissions.has('MANAGE_CHANNELS')) {
+    if (!interaction.member?.permissions.has(PermissionFlagsBits.ManageChannels)) {
       interaction.reply({
         content: '❌ You need "Manage Channels" permission or be the configured admin to use this command.',
         flags: MessageFlags.Ephemeral
@@ -857,7 +857,7 @@ class SlashCommandHandler {
   async handleRestartBotCommand(interaction) {
     // Check if user is the configured admin or has admin permissions
     const isConfiguredAdmin = config.adminDiscordId && interaction.user.id === config.adminDiscordId;
-    const hasAdminPerms = interaction.member?.permissions.has('ADMINISTRATOR');
+    const hasAdminPerms = interaction.member?.permissions.has(PermissionFlagsBits.Administrator);
     
     if (!isConfiguredAdmin && !hasAdminPerms) {
       await interaction.reply({

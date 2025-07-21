@@ -22,9 +22,18 @@ class BackupService {
    */
   async initialize() {
     try {
-      // Ensure backup directory exists
-      await fs.mkdir(this.backupDir, { recursive: true });
-      console.log('✅ Backup service initialized, backup directory ready');
+      // Ensure backup directory exists with proper permissions
+      await fs.mkdir(this.backupDir, { recursive: true, mode: 0o755 });
+      
+      // Test write permissions by creating and deleting a test file
+      const testFile = path.join(this.backupDir, '.write_test');
+      try {
+        await fs.writeFile(testFile, 'test');
+        await fs.unlink(testFile);
+        console.log('✅ Backup service initialized, backup directory ready with write permissions');
+      } catch (permError) {
+        throw new Error(`Backup directory exists but is not writable: ${permError.message}`);
+      }
       
       // Start periodic backups
       this.startPeriodicBackups();
@@ -32,9 +41,11 @@ class BackupService {
       errorHandler.logger.info('Backup service initialized successfully');
     } catch (error) {
       console.error('❌ Error initializing backup service:', error.message);
+      console.error('💡 If running in Docker, ensure the backup directory has proper permissions');
       errorHandler.logger.error('Failed to initialize backup service', { 
         error: error.message,
-        stack: error.stack 
+        stack: error.stack,
+        backupDir: this.backupDir 
       });
       throw error;
     }
