@@ -53,8 +53,8 @@ class ButtonHandler {
         return;
       }
       
-      // Check if user is registered
-      const userMapping = this.db.getUserMappingByDiscordId(userId);
+      // Check if user is registered - query database directly to avoid cache issues
+      const userMapping = await this.db.getUserMappingByDiscordIdFromDB(userId);
       if (!userMapping) {
         await interaction.reply({ 
           content: '❌ You must be linked to a FACEIT account to RSVP. Use `/register` to link your account with one click, or `/link <nickname>` if needed.',
