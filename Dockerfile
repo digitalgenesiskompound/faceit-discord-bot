@@ -19,8 +19,8 @@ RUN npm install --only=production --prefer-offline --no-audit --no-fund --silent
 COPY --chown=node:node src/ ./src/
 COPY --chown=node:node database.js ./database.js
 
-# Create data and logs directories
-RUN mkdir -p /app/data /app/logs && chown -R node:node /app/data /app/logs
+# Create data, logs, and backups directories
+RUN mkdir -p /app/data /app/logs /app/backups && chown -R node:node /app/data /app/logs /app/backups
 
 # Health check using curl instead of wget
 HEALTHCHECK --interval=60s --timeout=5s --start-period=10s --retries=3 \
