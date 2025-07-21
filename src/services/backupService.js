@@ -25,6 +25,39 @@ class BackupService {
       // Ensure backup directory exists with proper permissions
       await fs.mkdir(this.backupDir, { recursive: true, mode: 0o755 });
       
+      // Try to fix permissions if we're running as root or with sudo
+      try {
+        const { execSync } = require('child_process');
+        const { spawn } = require('child_process');
+        
+        // Check if we can fix permissions (ignore errors)
+        try {
+          await new Promise((resolve, reject) => {
+            const chown = spawn('chown', ['-R', 'node:node', this.backupDir], {
+              stdio: 'ignore'
+            });
+            chown.on('close', (code) => {
+              resolve(); // Always resolve, ignore exit code
+            });
+            chown.on('error', () => resolve()); // Ignore errors
+          });
+          
+          await new Promise((resolve, reject) => {
+            const chmod = spawn('chmod', ['-R', '755', this.backupDir], {
+              stdio: 'ignore'
+            });
+            chmod.on('close', (code) => {
+              resolve(); // Always resolve, ignore exit code
+            });
+            chmod.on('error', () => resolve()); // Ignore errors
+          });
+        } catch (e) {
+          // Ignore permission fix errors
+        }
+      } catch (e) {
+        // Ignore if child_process is not available
+      }
+      
       // Test write permissions by creating and deleting a test file
       const testFile = path.join(this.backupDir, '.write_test');
       try {
