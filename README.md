@@ -68,8 +68,7 @@ DISCORD_GUILD_ID=your_discord_server_id_here
 ### 3. Deploy
 
 ```bash
-- Copy bot token and bot client ID
-- Invite bot to server with "All Chat" permissions
+git clone https://github.com/digitalgenesiskompound/faceit-discord-bot.git
 cd faceit-discord-bot
 docker compose up -d
 ```
