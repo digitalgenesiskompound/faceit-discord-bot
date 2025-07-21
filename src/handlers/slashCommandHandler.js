@@ -1174,6 +1174,9 @@ class SlashCommandHandler {
       return;
     }
 
+    // Defer reply immediately to avoid timeout
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
     const playerId = customIdParts[1];
     const nickname = customIdParts.slice(2).join('_'); // In case nickname has underscores
     const userId = interaction.user.id;
@@ -1185,9 +1188,8 @@ class SlashCommandHandler {
       // Check if user is already linked
       const existingMapping = await this.db.getUserMappingByDiscordId(userId);
       if (existingMapping) {
-        await interaction.reply({
-          content: `❌ You are already linked to FACEIT account **${existingMapping.faceit_nickname}**. Use \`/unlink\` first if you want to link a different account.`,
-          flags: MessageFlags.Ephemeral
+        await interaction.editReply({
+          content: `❌ You are already linked to FACEIT account **${existingMapping.faceit_nickname}**. Use \`/unlink\` first if you want to link a different account.`
         });
         return;
       }
@@ -1195,9 +1197,8 @@ class SlashCommandHandler {
       // Check if this FACEIT account is already linked to someone else
       const existingUser = await this.db.getUserMappingByFaceitId(playerId);
       if (existingUser) {
-        await interaction.reply({
-          content: `❌ FACEIT account **${nickname}** is already linked to another Discord user.`,
-          flags: MessageFlags.Ephemeral
+        await interaction.editReply({
+          content: `❌ FACEIT account **${nickname}** is already linked to another Discord user.`
         });
         return;
       }
@@ -1207,9 +1208,8 @@ class SlashCommandHandler {
       const exactMatch = playerDetails.find(player => player.player_id === playerId);
 
       if (!exactMatch) {
-        await interaction.reply({
-          content: `❌ Could not find player details for **${nickname}**. Please try again or use \`/link ${nickname}\` manually.`,
-          flags: MessageFlags.Ephemeral
+        await interaction.editReply({
+          content: `❌ Could not find player details for **${nickname}**. Please try again or use \`/link ${nickname}\` manually.`
         });
         return;
       }
@@ -1234,21 +1234,20 @@ class SlashCommandHandler {
         .setColor(0x00ff00)
         .setTimestamp();
 
-      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      await interaction.editReply({ embeds: [embed] });
       console.log(`Successfully linked ${interaction.user.tag} to FACEIT account ${exactMatch.nickname} via button`);
 
     } catch (err) {
       console.error(`Error handling registration button: ${err.message}`);
       
-      // Only reply if the interaction hasn't been replied to yet
-      if (!interaction.replied && !interaction.deferred) {
+      // Use editReply since we already deferred
+      if (!interaction.replied) {
         try {
-          await interaction.reply({
-            content: '❌ Sorry, there was an error linking your account. Please try again later.',
-            flags: MessageFlags.Ephemeral
+          await interaction.editReply({
+            content: '❌ Sorry, there was an error linking your account. Please try again later.'
           });
         } catch (replyError) {
-          console.error(`Failed to reply to registration button interaction: ${replyError.message}`);
+          console.error(`Failed to edit reply for registration button interaction: ${replyError.message}`);
         }
       }
     }
