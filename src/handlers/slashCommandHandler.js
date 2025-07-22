@@ -353,35 +353,143 @@ class SlashCommandHandler {
   async handleProfileCommand(interaction) {
     const userId = interaction.user.id;
     
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+    
     try {
       const mapping = await this.db.getUserMappingByDiscordId(userId);
       if (!mapping) {
-        await interaction.reply({
-          content: 'You don\'t have a linked FACEIT account. Use `/register` to link your account with one click, or `/link <nickname>` if needed.',
-          flags: MessageFlags.Ephemeral
+        await interaction.editReply({
+          content: 'You don\'t have a linked FACEIT account. Use `/register` to link your account with one click, or `/link \<nickname\>` if needed.'
         });
         return;
       }
       
+      console.log(`Fetching FACEIT profile for: ${mapping.faceit_nickname}`);
+      
+      // Fetch real FACEIT data
+      const faceitService = require('../services/faceitService');
+      const faceitData = await faceitService.getPlayerByNickname(mapping.faceit_nickname);
+      
+      if (!faceitData) {
+        // Fallback to stored data if API fails
+        const embed = new EmbedBuilder()
+          .setTitle('🎮 Your Linked FACEIT Account')
+          .setDescription(`**[${mapping.faceit_nickname}](https://www.faceit.com/en/players/${mapping.faceit_nickname})**\n\n⚠️ Unable to fetch current stats from FACEIT API`)
+          .addFields(
+            { name: '🏆 Skill Level', value: mapping.faceit_skill_level || 'Unknown', inline: true },
+            { name: '🌍 Country', value: mapping.country || 'Unknown', inline: true },
+            { name: '📅 Linked On', value: new Date(mapping.registered_at).toLocaleDateString() || 'Invalid Date', inline: true }
+          )
+          .setColor(0xff5500)
+          .setTimestamp();
+        
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+      
+      // Extract CS2 game stats (preferred) or CS:GO as fallback
+      const cs2Stats = faceitData.games?.cs2;
+      const csgoStats = faceitData.games?.csgo;
+      const gameStats = cs2Stats || csgoStats;
+      
+      // Determine skill level and ELO
+      const skillLevel = gameStats?.skill_level || 'Unranked';
+      const elo = gameStats?.faceit_elo || 'N/A';
+      const currentGame = cs2Stats ? 'CS2' : csgoStats ? 'CS:GO' : 'Unknown';
+      
+      // Get additional stats
+      const totalMatches = gameStats?.matches_played || 0;
+      const winRate = gameStats?.wins && totalMatches ? Math.round((gameStats.wins / totalMatches) * 100) : 'N/A';
+      const avgKD = gameStats?.average_kd_ratio ? parseFloat(gameStats.average_kd_ratio).toFixed(2) : 'N/A';
+      const avgHS = gameStats?.average_hs_percentage ? Math.round(gameStats.average_hs_percentage) : 'N/A';
+      
+      // Build profile embed with only meaningful data
       const embed = new EmbedBuilder()
-        .setTitle('🎮 Your Linked FACEIT Account')
-        .setDescription(`**[${mapping.faceit_nickname}](https://www.faceit.com/en/players/${mapping.faceit_nickname})**`)
-        .addFields(
-          { name: '🏆 Skill Level', value: `${mapping.faceit_skill_level} (${mapping.faceit_elo} ELO)`, inline: true },
-          { name: '🌍 Country', value: mapping.country, inline: true },
-          { name: '📅 Linked On', value: new Date(mapping.registered_at).toLocaleDateString(), inline: true }
-        )
+        .setTitle('🎮 Your FACEIT Profile')
+        .setDescription(`**[${faceitData.nickname}](https://www.faceit.com/en/players/${faceitData.nickname})**`)
         .setColor(0xff5500)
         .setTimestamp();
       
-      await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
+      // Only add fields that have meaningful values
+      const fields = [];
+      
+      // Always show skill level and ELO if they have real values
+      if (skillLevel && skillLevel !== 'Unranked' && skillLevel !== 'Unknown') {
+        fields.push({ name: '🏆 Skill Level', value: `Level ${skillLevel}`, inline: true });
+      }
+      if (elo && elo !== 'N/A' && elo !== 'Unknown') {
+        fields.push({ name: '📊 ELO', value: `${elo}`, inline: true });
+      }
+      if (currentGame && currentGame !== 'Unknown') {
+        fields.push({ name: '🎯 Game', value: currentGame, inline: true });
+      }
+      
+      // Only show match stats if the player has actually played matches
+      if (totalMatches > 0) {
+        fields.push({ name: '🏅 Matches Played', value: `${totalMatches}`, inline: true });
+        
+        // Only show win rate if it's not N/A and not 0
+        if (winRate !== 'N/A' && winRate > 0) {
+          fields.push({ name: '📈 Win Rate', value: `${winRate}%`, inline: true });
+        }
+        // Only show K/D if it's not N/A and not 0
+        if (avgKD !== 'N/A' && parseFloat(avgKD) > 0) {
+          fields.push({ name: '💀 Avg K/D', value: avgKD, inline: true });
+        }
+        // Only show HS% if it's not N/A and not 0
+        if (avgHS !== 'N/A' && avgHS > 0) {
+          fields.push({ name: '🎯 Avg HS%', value: `${avgHS}%`, inline: true });
+        }
+      }
+      
+      // Add country if available
+      if (faceitData.country && faceitData.country !== 'Unknown') {
+        fields.push({ name: '🌍 Country', value: faceitData.country.toUpperCase(), inline: true });
+      }
+      
+      // Add linked date only if it's valid
+      if (mapping.registered_at) {
+        const linkedDate = new Date(mapping.registered_at);
+        if (!isNaN(linkedDate.getTime())) {
+          fields.push({ name: '📅 Linked On', value: linkedDate.toLocaleDateString(), inline: true });
+        }
+      }
+      
+      embed.addFields(fields);
+        
+      // Add avatar if available
+      if (faceitData.avatar) {
+        embed.setThumbnail(faceitData.avatar);
+      }
+      
+      // Add special badge for high skill levels
+      if (skillLevel && skillLevel !== 'Unranked' && parseInt(skillLevel) >= 8) {
+        embed.setColor(0x00ff00); // Green for high levels
+        embed.setFooter({ text: '🌟 Elite Player!' });
+      } else if (skillLevel && parseInt(skillLevel) >= 5) {
+        embed.setColor(0xffd700); // Gold for intermediate levels
+      }
+      
+      // Update stored data with fresh info if we got valid data
+      if (gameStats) {
+        try {
+          await this.db.updateUserMappingStats(userId, {
+            faceit_skill_level: skillLevel,
+            faceit_elo: elo,
+            country: faceitData.country
+          });
+        } catch (updateErr) {
+          console.error(`Error updating stored user stats: ${updateErr.message}`);
+        }
+      }
+      
+      await interaction.editReply({ embeds: [embed] });
       
     } catch (err) {
       console.error(`Error handling /profile command: ${err.message}`);
-        await interaction.reply({
-          content: 'Sorry, there was an error retrieving your profile.',
-          flags: MessageFlags.Ephemeral
-        });
+      await interaction.editReply({
+        content: 'Sorry, there was an error retrieving your profile. Please try again later.'
+      });
     }
   }
 
@@ -1232,13 +1340,36 @@ class SlashCommandHandler {
       const embed = new EmbedBuilder()
         .setTitle('✅ Successfully Linked!')
         .setDescription(`Your Discord account has been linked to FACEIT account **[${exactMatch.nickname}](https://www.faceit.com/en/players/${exactMatch.nickname})**`)
-        .addFields(
-          { name: '🏆 Skill Level', value: `${exactMatch.games?.cs2?.skill_level || exactMatch.games?.csgo?.skill_level || 'Unknown'}`, inline: true },
-          { name: '🏅 ELO', value: `${exactMatch.games?.cs2?.faceit_elo || exactMatch.games?.csgo?.faceit_elo || 'Unknown'}`, inline: true },
-          { name: '🌍 Country', value: exactMatch.country || 'Unknown', inline: true }
-        )
         .setColor(0x00ff00)
         .setTimestamp();
+      
+      // Only add fields that have meaningful values (same logic as profile command)
+      const fields = [];
+      
+      const skillLevel = exactMatch.games?.cs2?.skill_level || exactMatch.games?.csgo?.skill_level;
+      const elo = exactMatch.games?.cs2?.faceit_elo || exactMatch.games?.csgo?.faceit_elo;
+      const currentGame = exactMatch.games?.cs2 ? 'CS2' : exactMatch.games?.csgo ? 'CS:GO' : null;
+      
+      // Only show skill level if it has a real value
+      if (skillLevel && skillLevel !== 'Unknown') {
+        fields.push({ name: '🏆 Skill Level', value: `Level ${skillLevel}`, inline: true });
+      }
+      // Only show ELO if it has a real value
+      if (elo && elo !== 'Unknown') {
+        fields.push({ name: '📊 ELO', value: `${elo}`, inline: true });
+      }
+      // Only show game if detected
+      if (currentGame) {
+        fields.push({ name: '🎯 Game', value: currentGame, inline: true });
+      }
+      // Only show country if available
+      if (exactMatch.country && exactMatch.country !== 'Unknown') {
+        fields.push({ name: '🌍 Country', value: exactMatch.country.toUpperCase(), inline: true });
+      }
+      
+      if (fields.length > 0) {
+        embed.addFields(fields);
+      }
 
       await interaction.editReply({ embeds: [embed] });
       console.log(`Successfully linked ${interaction.user.tag} to FACEIT account ${exactMatch.nickname} via button`);

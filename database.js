@@ -374,6 +374,23 @@ class Database {
     const query = 'SELECT * FROM user_mappings ORDER BY registered_at';
     return this.all(query);
   }
+  
+  async updateUserMappingStats(discordId, stats) {
+    const query = `
+      UPDATE user_mappings 
+      SET faceit_skill_level = COALESCE(?, faceit_skill_level),
+          faceit_elo = COALESCE(?, faceit_elo),
+          country = COALESCE(?, country),
+          updated_at = CURRENT_TIMESTAMP
+      WHERE discord_id = ?
+    `;
+    return this.run(query, [
+      stats.faceit_skill_level,
+      stats.faceit_elo, 
+      stats.country,
+      discordId
+    ]);
+  }
 
   // MATCH METHODS
   async addOrUpdateMatch(matchData) {

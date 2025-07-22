@@ -146,6 +146,29 @@ class DatabaseService {
              mapping.faceit_nickname.toLowerCase() === query;
     });
   }
+  
+  /**
+   * Update user mapping stats with fresh FACEIT data
+   */
+  async updateUserMappingStats(discordId, stats) {
+    return await databaseLockManager.withLock('user_mappings', async () => {
+      try {
+        // Update database
+        await this.db.updateUserMappingStats(discordId, stats);
+        
+        // Update memory cache
+        if (this.userMappings[discordId]) {
+          this.userMappings[discordId].faceit_skill_level = stats.faceit_skill_level || this.userMappings[discordId].faceit_skill_level;
+          this.userMappings[discordId].faceit_elo = stats.faceit_elo || this.userMappings[discordId].faceit_elo;
+          this.userMappings[discordId].country = stats.country || this.userMappings[discordId].country;
+          this.userMappings[discordId].updated_at = new Date().toISOString();
+        }
+      } catch (err) {
+        console.error(`Error updating user mapping stats: ${err.message}`);
+        throw err;
+      }
+    });
+  }
 
   // RSVP methods
   getUserRsvp(matchId, discordId) {

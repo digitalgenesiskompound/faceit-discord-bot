@@ -63,6 +63,22 @@ class ButtonHandler {
         return;
       }
       
+      // Check if the bot is a member of the thread
+      if (interaction.channel && interaction.channel.isThread()) {
+        const isBotMember = await this.discordService.checkThreadMembership(interaction.channel);
+        if (!isBotMember) {
+          console.log(`🤝 Bot is not a member of thread ${interaction.channel.name}, joining...`);
+          const joined = await this.discordService.joinThread(interaction.channel);
+          if (!joined) {
+            await interaction.reply({
+              content: '⚠️ There was a problem joining the thread. Please try again later.',
+              flags: MessageFlags.Ephemeral
+            });
+            return;
+          }
+        }
+      }
+      
       // Check if user already has an RSVP for this match
       const existingRsvp = this.db.getUserRsvp(matchId, userId);
       
@@ -110,30 +126,71 @@ class ButtonHandler {
       const matchRsvps = this.db.getRsvpForMatch(matchId);
       const allUserMappings = this.db.userMappings;
       
-      // Get all registered users for complete status
-      const registeredUsers = Object.values(allUserMappings);
+      // Get all team players from FACEIT using cached data (same as createDynamicRsvpStatus)
+      let teamPlayers = [];
+      try {
+        const timeSensitiveCache = require('../services/timeSensitiveCacheService');
+        teamPlayers = await timeSensitiveCache.getTeamPlayersTimeAware(async () => {
+          const faceitService = require('../services/faceitService');
+          const teamData = await faceitService.makeProtectedApiRequest(
+            `https://open.faceit.com/data/v4/teams/${require('../config/config').faceit.teamId}`,
+            {},
+            {
+              operation: 'list_team_players_button',
+              teamId: require('../config/config').faceit.teamId
+            }
+          );
+          
+          if (teamData && teamData.members) {
+            return teamData.members;
+          }
+          return [];
+        });
+      } catch (err) {
+        console.error(`Error fetching team players: ${err.message}`);
+        // Fallback to registered Discord users if FACEIT API fails
+        teamPlayers = Object.values(allUserMappings).map(user => ({ nickname: user.faceit_nickname }));
+      }
       
-      // Categorize users by RSVP status
+      if (teamPlayers.length === 0) {
+        await interaction.reply({
+          content: '❌ No team players found. Please try again later.',
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+      
+      // Create a mapping of FACEIT nicknames to Discord user mappings for quick lookup
+      const nicknameToDiscordMapping = new Map();
+      Object.values(allUserMappings).forEach(user => {
+        nicknameToDiscordMapping.set(user.faceit_nickname, user);
+      });
+      
+      // Categorize players by RSVP status
       const attendingPlayers = [];
       const notAttendingPlayers = [];
       const noResponsePlayers = [];
       
-      registeredUsers.forEach(user => {
-        const rsvp = matchRsvps[user.discord_id];
-        if (rsvp) {
+      teamPlayers.forEach(player => {
+        const playerNickname = player.nickname;
+        const discordUser = nicknameToDiscordMapping.get(playerNickname);
+        
+        if (discordUser && matchRsvps[discordUser.discord_id]) {
+          const rsvp = matchRsvps[discordUser.discord_id];
           if (rsvp.response === 'yes') {
             attendingPlayers.push({
-              nickname: user.faceit_nickname,
+              nickname: playerNickname,
               timestamp: rsvp.timestamp
             });
           } else {
             notAttendingPlayers.push({
-              nickname: user.faceit_nickname,
+              nickname: playerNickname,
               timestamp: rsvp.timestamp
             });
           }
         } else {
-          noResponsePlayers.push(user.faceit_nickname);
+          // Player hasn't RSVP'd (either not registered with Discord or no RSVP response)
+          noResponsePlayers.push(playerNickname);
         }
       });
       
@@ -150,9 +207,9 @@ class ButtonHandler {
       if (match && match.teams) {
         const faction1 = match.teams.faction1?.name || 'TBD';
         const faction2 = match.teams.faction2?.name || 'TBD';
-        embed.setDescription(`**Match:** ${faction1} vs ${faction2}\n**Total Registered Players:** ${registeredUsers.length}`);
+        embed.setDescription(`**Match:** ${faction1} vs ${faction2}\n**Total Team Players:** ${teamPlayers.length}`);
       } else {
-        embed.setDescription(`**Match ID:** \`${matchId}\`\n**Total Registered Players:** ${registeredUsers.length}`);
+        embed.setDescription(`**Match ID:** \`${matchId}\`\n**Total Team Players:** ${teamPlayers.length}`);
       }
       
       // Add attending players
@@ -187,22 +244,28 @@ class ButtonHandler {
         });
       }
       
-      // Add no response players
+      // Add no response players (always show, even if empty for completeness)
       if (noResponsePlayers.length > 0) {
         embed.addFields({
           name: `⏳ No Response (${noResponsePlayers.length})`,
           value: noResponsePlayers.join('\n'),
           inline: true
         });
+      } else {
+        embed.addFields({
+          name: '⏳ No Response (0)',
+          value: 'All players have responded',
+          inline: true
+        });
       }
       
       // Add summary statistics
-      const responseRate = registeredUsers.length > 0 ? 
-        Math.round(((attendingPlayers.length + notAttendingPlayers.length) / registeredUsers.length) * 100) : 0;
+      const responseRate = teamPlayers.length > 0 ? 
+        Math.round(((attendingPlayers.length + notAttendingPlayers.length) / teamPlayers.length) * 100) : 0;
       
       embed.addFields({
         name: '📊 Summary',
-        value: `**Response Rate:** ${responseRate}% (${attendingPlayers.length + notAttendingPlayers.length}/${registeredUsers.length})\n**Latest Update:** <t:${Math.floor(Date.now() / 1000)}:R>`,
+        value: `**Response Rate:** ${responseRate}% (${attendingPlayers.length + notAttendingPlayers.length}/${teamPlayers.length})\n**Latest Update:** <t:${Math.floor(Date.now() / 1000)}:R>`,
         inline: false
       });
       

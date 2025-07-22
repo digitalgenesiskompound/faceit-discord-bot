@@ -71,24 +71,48 @@ class RsvpService {
         throw new Error(`Could not fetch thread ${threadId} for match ${matchId}`);
       }
       
-      // Step 3: Find the bot-authored RSVP Status message
-      const messages = await thread.messages.fetch({ limit: 50 }); // Fetch more messages to be thorough
-      const rsvpMessage = messages.find(msg => 
-        msg.author.id === this.client.user.id && 
-        msg.embeds.length > 0 && 
-        msg.embeds[0].title && 
-        msg.embeds[0].title.includes('RSVP Status')
-      );
+      // Step 3: Check for any RSVP-related activity in the thread
+      console.log(`🔍 Analyzing thread activity for RSVP evidence`);
+      const messages = await thread.messages.fetch({ limit: 50 });
       
-      if (!rsvpMessage) {
-        throw new Error(`No RSVP Status message found in thread ${threadId} for match ${matchId}`);
+      // Check if this is a result thread that shouldn't have RSVP sync
+      const isResultThread = thread.name && thread.name.startsWith('RESULT:');
+      if (isResultThread) {
+        console.log(`⚠️ Skipping RSVP sync for RESULT thread ${threadId} (match ${matchId}) - RSVP not applicable`);
+        return {
+          matchId,
+          threadId,
+          skipReason: 'RESULT_THREAD_NO_RSVP',
+          message: 'Result threads do not need RSVP synchronization'
+        };
       }
       
-      console.log(`💬 Found RSVP message: "${rsvpMessage.embeds[0].title}"`);
+      // Look for evidence of RSVP activity in the thread
+      const rsvpEvidence = await this.analyzeThreadRsvpActivity(messages, matchId);
+      console.log(`📋 Thread RSVP activity analysis:`, rsvpEvidence);
       
-      // Step 4: Extract RSVP data from the Discord message embed
-      const displayedRsvps = this.extractRsvpFromMessage(rsvpMessage);
-      console.log(`🖥️ Displayed RSVP state:`, displayedRsvps);
+      // If no RSVP activity found in thread, database is the source of truth
+      if (!rsvpEvidence.hasRsvpActivity) {
+        console.log(`✅ No RSVP activity detected in thread - database is authoritative for match ${matchId}`);
+        return {
+          matchId,
+          threadId,
+          databaseState: databaseRsvps,
+          displayedState: { attending: [], notAttending: [], noResponse: [] },
+          comparison: {
+            isMatching: true, // Consider it matching since thread has no RSVP data to conflict with
+            differences: {},
+            summary: { threadHasNoRsvpActivity: true }
+          },
+          noThreadActivity: true
+        };
+      }
+      
+      console.log(`💬 Found RSVP activity in thread for match ${matchId}`);
+      
+      // Step 4: Extract RSVP data from the thread activity
+      const displayedRsvps = rsvpEvidence.extractedRsvps;
+      console.log(`🖥️ Thread RSVP state:`, displayedRsvps);
       
       // Step 5: Compare the states
       const comparison = this.compareStates(databaseRsvps, displayedRsvps, this.db.userMappings);
@@ -100,14 +124,103 @@ class RsvpService {
         databaseState: databaseRsvps,
         displayedState: displayedRsvps,
         comparison,
-        messageId: rsvpMessage.id,
-        messageTimestamp: rsvpMessage.createdAt
+        activitySource: rsvpEvidence.activitySource || 'thread_analysis'
       };
       
     } catch (error) {
       console.error(`❌ Error comparing RSVP states for match ${matchId}:`, error.message);
       throw error;
     }
+  }
+
+  /**
+   * Analyze thread messages for RSVP activity evidence
+   * @param {Collection} messages - Discord messages from the thread
+   * @param {string} matchId - The match ID being analyzed
+   * @returns {Object} Analysis results
+   */
+  async analyzeThreadRsvpActivity(messages, matchId) {
+    const evidence = {
+      hasRsvpActivity: false,
+      extractedRsvps: { attending: [], notAttending: [], noResponse: [] },
+      activitySource: null,
+      foundMessages: []
+    };
+    
+    console.log(`🔍 Analyzing ${messages.size} messages for RSVP activity...`);
+    
+    for (const [messageId, message] of messages) {
+      // Look for RSVP Status messages (bot-authored embeds)
+      if (message.author.id === this.client.user.id && 
+          message.embeds.length > 0 && 
+          message.embeds[0].title && 
+          message.embeds[0].title.includes('RSVP Status')) {
+        
+        console.log(`💬 Found RSVP Status embed: "${message.embeds[0].title}"`);
+        evidence.hasRsvpActivity = true;
+        evidence.activitySource = 'rsvp_status_embed';
+        evidence.foundMessages.push({
+          id: messageId,
+          type: 'rsvp_status_embed',
+          content: message.embeds[0].title
+        });
+        
+        // Extract RSVP data from this message
+        const extractedData = this.extractRsvpFromMessage(message);
+        evidence.extractedRsvps = extractedData;
+        break; // Use the first RSVP Status message found
+      }
+      
+      // Look for messages with RSVP buttons (bot-authored with components)
+      if (message.author.id === this.client.user.id && 
+          message.components && 
+          message.components.length > 0) {
+        
+        const hasRsvpButtons = message.components.some(row => 
+          row.components && row.components.some(button => 
+            button.customId && button.customId.includes(`rsvp_`) && button.customId.includes(matchId)
+          )
+        );
+        
+        if (hasRsvpButtons) {
+          console.log(`🔘 Found message with RSVP buttons for match ${matchId}`);
+          evidence.hasRsvpActivity = true;
+          if (!evidence.activitySource) {
+            evidence.activitySource = 'rsvp_buttons';
+            evidence.foundMessages.push({
+              id: messageId,
+              type: 'rsvp_buttons',
+              content: 'Message with RSVP buttons'
+            });
+          }
+        }
+      }
+      
+      // Look for messages mentioning RSVP or attendance keywords
+      const messageContent = message.content?.toLowerCase() || '';
+      const rsvpKeywords = ['rsvp', 'attending', 'not attending', 'can\'t make it', 'will be there'];
+      
+      if (rsvpKeywords.some(keyword => messageContent.includes(keyword))) {
+        console.log(`💬 Found message with RSVP keywords: "${message.content?.substring(0, 50)}..."`);
+        evidence.hasRsvpActivity = true;
+        if (!evidence.activitySource) {
+          evidence.activitySource = 'keyword_mentions';
+          evidence.foundMessages.push({
+            id: messageId,
+            type: 'keyword_mentions',
+            content: message.content?.substring(0, 100) || 'No content'
+          });
+        }
+      }
+    }
+    
+    console.log(`📋 Analysis complete: ${evidence.hasRsvpActivity ? 'RSVP activity detected' : 'No RSVP activity found'}`);
+    if (evidence.hasRsvpActivity) {
+      console.log(`🔍 Activity source: ${evidence.activitySource}`);
+      console.log(`📋 Found messages:`, evidence.foundMessages.map(m => `${m.type}: ${m.content}`));
+    }
+    
+    return evidence;
   }
 
   /**
@@ -327,6 +440,19 @@ class RsvpService {
       // Step 1: Compare current RSVP states
       const comparisonResult = await this.compareRsvpStates(matchId);
       
+      // Check if we should skip this match (only for RESULT threads)
+      if (comparisonResult.skipReason === 'RESULT_THREAD_NO_RSVP') {
+        console.log(`⏭️ Skipping RSVP sync for RESULT thread (match ${matchId}) - RSVP not applicable`);
+        return {
+          matchId,
+          hadMismatch: false,
+          updateTriggered: false,
+          skipped: true,
+          skipReason: comparisonResult.skipReason,
+          message: comparisonResult.message
+        };
+      }
+      
       // Step 2: Check if there's a mismatch
       if (comparisonResult.comparison.isMatching) {
         console.log(`✅ RSVP states are synchronized for match ${matchId}`);
@@ -434,6 +560,7 @@ class RsvpService {
       synchronized: 0,
       mismatched: 0,
       updated: 0,
+      skipped: 0,
       errors: 0,
       details: []
     };
@@ -449,6 +576,8 @@ class RsvpService {
         
         if (result.error) {
           results.errors++;
+        } else if (result.skipped) {
+          results.skipped++;
         } else if (!result.hadMismatch) {
           results.synchronized++;
         } else {
@@ -478,6 +607,7 @@ class RsvpService {
     console.log(`\n📊 Batch Processing Summary:`);
     console.log(`   Total processed: ${results.processed}`);
     console.log(`   Already synchronized: ${results.synchronized}`);
+    console.log(`   Skipped (no RSVP applicable): ${results.skipped}`);
     console.log(`   Mismatched: ${results.mismatched}`);
     console.log(`   Successfully updated: ${results.updated}`);
     console.log(`   Errors: ${results.errors}`);

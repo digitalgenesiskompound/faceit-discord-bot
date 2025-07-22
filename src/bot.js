@@ -116,7 +116,8 @@ class FaceitBot {
         try {
           await this.buttonHandler.handleButtonInteraction(interaction);
         } catch (error) {
-          console.error('Error handling button interaction:', error);
+          console.error('❌ Error handling button interaction:', error);
+          console.error('Stack trace:', error.stack);
         }
       } else if (interaction.isCommand()) {
         console.log(`⚡ Slash command interaction: /${interaction.commandName}`);

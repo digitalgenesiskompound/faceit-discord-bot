@@ -182,7 +182,7 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
       const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
       
       // Get current RSVP status
-      const rsvpStatus = this.createDynamicRsvpStatus(match.match_id);
+      const rsvpStatus = await this.createDynamicRsvpStatus(match.match_id);
       
       const rsvpEmbed = new EmbedBuilder()
         .setTitle(`📋 ${faction1} vs ${faction2} - RSVP Status`)
@@ -260,7 +260,7 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
           const existingDescription = existingEmbed.description;
           
           // Get updated RSVP status
-          const rsvpStatus = this.createDynamicRsvpStatus(matchId);
+          const rsvpStatus = await this.createDynamicRsvpStatus(matchId);
           
           // Update just the RSVP section in the description
           const descriptionParts = existingDescription.split('**Current RSVPs:**\n');
@@ -302,7 +302,9 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
           });
           console.log(`Updated RSVP message with simplified status for match ${matchId}`);
         } else {
-          console.log(`RSVP message not found for match ${matchId}, cannot update`);
+          console.log(`RSVP message not found for match ${matchId}, creating new RSVP Status message`);
+          // Create a new RSVP Status message since it doesn't exist
+          await this.sendSimpleRsvpMessage(thread, { match_id: matchId });
         }
         return;
       }
@@ -313,7 +315,7 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
       const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
       
       // Get updated RSVP status
-      const rsvpStatus = this.createDynamicRsvpStatus(matchId);
+      const rsvpStatus = await this.createDynamicRsvpStatus(matchId);
       
       // Create updated RSVP embed
       const rsvpEmbed = new EmbedBuilder()
@@ -356,7 +358,13 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         });
         console.log(`Updated RSVP message with status for match ${matchId}`);
       } else {
-        console.log(`RSVP message not found for match ${matchId}`);
+        console.log(`RSVP message not found for match ${matchId}, creating new one`);
+        // Create new RSVP Status message since it doesn't exist
+        await thread.send({ 
+          embeds: [rsvpEmbed], 
+          components: [rsvpRow]
+        });
+        console.log(`Created new RSVP message for match ${matchId}`);
       }
       
     } catch (err) {
@@ -754,6 +762,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       console.log(`📋 Found ${activeThreads.threads.size} active and ${allArchivedThreads.size} archived threads`);
       
       let reconciledCount = 0;
+      let joinedCount = 0;
       const foundMatchIds = new Set();
       
       for (const thread of allThreads) {
@@ -763,6 +772,19 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
           if (matchId) {
             console.log(`Found match thread: ${thread.name} -> Match ID: ${matchId}`);
             foundMatchIds.add(matchId);
+            
+            // Check if bot is a member of this thread
+            const isMember = await this.checkThreadMembership(thread);
+            if (!isMember) {
+              console.log(`🤝 Bot is not a member of thread ${thread.name}, joining...`);
+              const joined = await this.joinThread(thread);
+              if (joined) {
+                joinedCount++;
+                console.log(`✅ Successfully joined thread: ${thread.name}`);
+              }
+            } else {
+              console.log(`✅ Bot is already a member of thread: ${thread.name}`);
+            }
             
             // Check if this thread is already tracked in database (any type)
             const hasAnyThreadInDB = await this.db.hasAnyMatchThread(matchId);
@@ -798,10 +820,62 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
         }
       }
       
-      console.log(`✅ Thread reconciliation complete - restored ${reconciledCount} thread references, cleaned ${staleCount} stale references`);
+      console.log(`✅ Thread reconciliation complete - restored ${reconciledCount} thread references, joined ${joinedCount} threads, cleaned ${staleCount} stale references`);
 
     } catch (err) {
       console.error(`Error during thread reconciliation: ${err.message}`);
+    }
+  }
+
+  /**
+   * Check if the bot is a member of a thread
+   */
+  async checkThreadMembership(thread) {
+    try {
+      // Check if the bot is in the thread's member list
+      const members = await thread.members.fetch();
+      return members.has(this.client.user.id);
+    } catch (err) {
+      console.error(`Error checking thread membership for ${thread.name}: ${err.message}`);
+      return false;
+    }
+  }
+
+  /**
+   * Join a thread as the bot
+   */
+  async joinThread(thread) {
+    try {
+      // Check if thread is archived or locked
+      if (thread.archived) {
+        console.log(`Thread ${thread.name} is archived, cannot join`);
+        return false;
+      }
+      
+      if (thread.locked) {
+        console.log(`Thread ${thread.name} is locked, cannot join`);
+        return false;
+      }
+      
+      // Join the thread
+      await thread.join();
+      
+      // Small delay to ensure membership is registered
+      await new Promise(resolve => setTimeout(resolve, 500));
+      
+      // Verify we actually joined
+      const isNowMember = await this.checkThreadMembership(thread);
+      if (isNowMember) {
+        console.log(`✅ Successfully joined and verified membership in: ${thread.name}`);
+        return true;
+      } else {
+        console.warn(`⚠️ Joined thread but membership verification failed: ${thread.name}`);
+        return false;
+      }
+      
+    } catch (err) {
+      console.error(`Error joining thread ${thread.name}: ${err.message}`);
+      return false;
     }
   }
 
@@ -980,7 +1054,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       const matchUrl = `https://www.faceit.com/en/cs2/room/${match.match_id}`;
       
       // Get current RSVP status for dynamic display
-      const rsvpStatus = this.createDynamicRsvpStatus(match.match_id);
+      const rsvpStatus = await this.createDynamicRsvpStatus(match.match_id);
       
       const welcomeEmbed = new EmbedBuilder()
         .setTitle(`🎯 ${faction1} vs ${faction2} - Match Thread`)
@@ -1107,45 +1181,70 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
   /**
    * Create dynamic RSVP status display for thread welcome messages
    */
-  createDynamicRsvpStatus(matchId) {
+  async createDynamicRsvpStatus(matchId) {
     try {
       const matchRsvps = this.db.getRsvpForMatch(matchId);
       const allUserMappings = this.db.userMappings;
-      const registeredUsers = Object.values(allUserMappings);
       
-      if (registeredUsers.length === 0) {
-        return 'No team members registered yet. Use the buttons above to RSVP!';
+      // Get all team players from FACEIT
+      let teamPlayers = [];
+      try {
+        const faceitService = require('./faceitService');
+        teamPlayers = await faceitService.listTeamPlayers();
+      } catch (err) {
+        console.error(`Error fetching team players: ${err.message}`);
+        // Fallback to registered Discord users if FACEIT API fails
+        teamPlayers = Object.values(allUserMappings).map(user => ({ nickname: user.faceit_nickname }));
       }
       
-      // Categorize users by RSVP status
+      if (teamPlayers.length === 0) {
+        return 'No team players found. Use the buttons above to RSVP!';
+      }
+      
+      // Categorize players by RSVP status
       const attendingPlayers = [];
       const notAttendingPlayers = [];
       const noResponsePlayers = [];
       
-      registeredUsers.forEach(user => {
-        const rsvp = matchRsvps[user.discord_id];
-        if (rsvp) {
+      // Create a mapping of FACEIT nicknames to Discord user mappings for quick lookup
+      const nicknameToDiscordMapping = new Map();
+      Object.values(allUserMappings).forEach(user => {
+        nicknameToDiscordMapping.set(user.faceit_nickname, user);
+      });
+      
+      teamPlayers.forEach(player => {
+        const playerNickname = player.nickname;
+        const discordUser = nicknameToDiscordMapping.get(playerNickname);
+        
+        if (discordUser && matchRsvps[discordUser.discord_id]) {
+          const rsvp = matchRsvps[discordUser.discord_id];
           if (rsvp.response === 'yes') {
-            attendingPlayers.push(user.faceit_nickname);
+            attendingPlayers.push(playerNickname);
           } else {
-            notAttendingPlayers.push(user.faceit_nickname);
+            notAttendingPlayers.push(playerNickname);
           }
         } else {
-          noResponsePlayers.push(user.faceit_nickname);
+          // Player hasn't RSVP'd (either not registered with Discord or no RSVP response)
+          noResponsePlayers.push(playerNickname);
         }
       });
       
       let statusText = '';
       
       if (attendingPlayers.length > 0) {
-        statusText += `✅ **Attending (${attendingPlayers.length}):** ${attendingPlayers.join(', ')}\n\n`;
+        statusText += `✅ **Attending (${attendingPlayers.length}):** ${attendingPlayers.join(', ')}\n`;
       }
       
       if (notAttendingPlayers.length > 0) {
-        statusText += `❌ **Not Attending (${notAttendingPlayers.length}):** ${notAttendingPlayers.join(', ')}\n\n`;
+        statusText += `❌ **Not Attending (${notAttendingPlayers.length}):** ${notAttendingPlayers.join(', ')}\n`;
       }
       
+      // Add No Response section if there are players who haven't responded
       if (noResponsePlayers.length > 0) {
+        // Add spacing before the "No Response" section if there are other RSVPs
+        if (statusText.length > 0) {
+          statusText += '\n';
+        }
         statusText += `⏳ **No Response (${noResponsePlayers.length}):** ${noResponsePlayers.join(', ')}`;
       }
       
@@ -1153,7 +1252,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
         statusText = 'No RSVPs yet. Use the buttons above to respond!';
       }
       
-      return statusText;
+      return statusText.trim();
       
     } catch (err) {
       console.error(`Error creating dynamic RSVP status: ${err.message}`);
