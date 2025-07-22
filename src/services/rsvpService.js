@@ -282,27 +282,32 @@ class RsvpService {
             continue;
           }
           
-          // Also try simpler patterns without emoji requirements
-          if (line.includes('Attending') && line.includes(':**')) {
-            console.log(`🔍 Debug: Line contains 'Attending' with colon pattern, trying fallback match`);
-            
-            // Try to extract from "**Attending (X):** names" pattern
+          // More specific patterns without emoji requirements - handle each type separately
+          // Handle "**Attending (X):** names" pattern first (must not contain "Not" or "No")
+          if (line.includes('**Attending') && line.includes(':**') && !line.includes('Not') && !line.includes('No')) {
+            console.log(`🔍 Debug: Line contains 'Attending' pattern (not Not/No Attending)`);
             const attendingFallbackMatch = line.match(/\*\*Attending.*?\*\*.*?:\s*(.+)/);
             if (attendingFallbackMatch) {
               console.log(`✅ Found attending fallback match:`, attendingFallbackMatch[1]);
               extractedRsvps.attending = attendingFallbackMatch[1].split(',').map(name => name.trim()).filter(name => name);
               continue;
             }
-            
-            // Try to extract from "**Not Attending (X):** names" pattern
+          }
+          
+          // Handle "**Not Attending (X):** names" pattern
+          if (line.includes('**Not Attending') && line.includes(':**')) {
+            console.log(`🔍 Debug: Line contains 'Not Attending' pattern`);
             const notAttendingFallbackMatch = line.match(/\*\*Not Attending.*?\*\*.*?:\s*(.+)/);
             if (notAttendingFallbackMatch) {
               console.log(`❌ Found not attending fallback match:`, notAttendingFallbackMatch[1]);
               extractedRsvps.notAttending = notAttendingFallbackMatch[1].split(',').map(name => name.trim()).filter(name => name);
               continue;
             }
-            
-            // Try to extract from "**No Response (X):** names" pattern
+          }
+          
+          // Handle "**No Response (X):** names" pattern
+          if (line.includes('**No Response') && line.includes(':**')) {
+            console.log(`🔍 Debug: Line contains 'No Response' pattern`);
             const noResponseFallbackMatch = line.match(/\*\*No Response.*?\*\*.*?:\s*(.+)/);
             if (noResponseFallbackMatch) {
               console.log(`⏳ Found no response fallback match:`, noResponseFallbackMatch[1]);
