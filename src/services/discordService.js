@@ -1761,13 +1761,15 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       
       const summaryEmbed = this.createMatchSummaryEmbed(match, winner, result, matchDate);
       
-      // Add a separator message to indicate the match has finished
-      await existingThread.send('\n═══════════════════════════════════════');
-      await existingThread.send('🏁 **MATCH FINISHED** 🏁');
-      await existingThread.send('═══════════════════════════════════════\n');
-      
-      // Send the match summary
+      // Send the match summary (matching original RESULT thread style)
       await existingThread.send({ embeds: [summaryEmbed] });
+      
+      // Get team performance data if available (matching original RESULT thread style)
+      const performanceData = await this.getMatchPerformanceData(match);
+      if (performanceData) {
+        const performanceEmbed = this.createPerformanceEmbed(match, performanceData);
+        await existingThread.send({ embeds: [performanceEmbed] });
+      }
       
       // Invalidate cache since we changed thread type
       this.invalidateMatchCache(match.match_id);
