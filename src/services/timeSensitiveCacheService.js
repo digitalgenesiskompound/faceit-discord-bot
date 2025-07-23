@@ -387,13 +387,55 @@ class TimeSensitiveCacheService {
           // The shorter TTLs (3 minutes for finished matches) will ensure fresh data
           
         } else if (period === 'NORMAL_PERIOD') {
-          // Log normal period status
-          console.log('📊 Normal cache period - using longer TTLs for efficiency');
+          // During normal periods, check for matches that should have finished
+          await this.checkForOverdueMatches();
         }
       } catch (error) {
         console.error('Error in proactive checking:', error);
       }
     }, this.MATCH_TIME_CONFIG.PROACTIVE_CHECK_INTERVAL * 60 * 1000); // Convert minutes to ms
+  }
+  
+  /**
+   * Check for matches that should have finished but may not be reflected in cache
+   */
+  async checkForOverdueMatches() {
+    try {
+      console.log('🔍 Checking for overdue matches that may have finished...');
+      
+      const upcomingMatches = await this.getUpcomingMatchesFromCache();
+      if (!upcomingMatches || upcomingMatches.length === 0) {
+        return;
+      }
+      
+      const now = Date.now() / 1000; // Unix timestamp
+      let foundOverdueMatches = false;
+      
+      for (const match of upcomingMatches) {
+        if (!match.scheduled_at) continue;
+        
+        const matchTime = match.scheduled_at;
+        const timeSinceScheduled = now - matchTime;
+        const hoursSinceScheduled = timeSinceScheduled / 3600;
+        
+        // If a match was scheduled more than 2.5 hours ago, it's likely finished
+        // (Typical CS2 matches last 1-2 hours, so 2.5 hours is a safe threshold)
+        if (hoursSinceScheduled >= 2.5) {
+          console.log(`⚠️ Found overdue match: ${match.match_id} (${match.teams?.faction1?.name} vs ${match.teams?.faction2?.name})`);
+          console.log(`   Scheduled: ${new Date(matchTime * 1000).toISOString()}`);
+          console.log(`   Hours since scheduled: ${hoursSinceScheduled.toFixed(1)}`);
+          foundOverdueMatches = true;
+        }
+      }
+      
+      if (foundOverdueMatches) {
+        console.log('🔄 Overdue matches detected - invalidating cache to check for results...');
+        await this.invalidateCacheForEvent('match_transition_check');
+      }
+      
+    } catch (error) {
+      console.error('Error checking for overdue matches:', error);
+    }
   }
   
   /**
@@ -463,6 +505,17 @@ class TimeSensitiveCacheService {
       case 'thread_updated':
         // Invalidate relevant caches when threads are created/updated
         await this.baseCache.invalidateCache('matches:upcoming');
+        break;
+        
+      case 'match_transition_check':
+        // Clear caches to check for match state transitions (upcoming -> finished)
+        console.log('🔄 Clearing caches to check for match state transitions...');
+        await this.baseCache.invalidateCache('matches:upcoming');
+        await this.baseCache.invalidateCache('matches:finished:10');
+        await this.baseCache.invalidateCache('matches:finished:20');
+        this.lastCacheTimes.delete('matches:upcoming');
+        this.lastCacheTimes.delete('matches:finished:10');
+        this.lastCacheTimes.delete('matches:finished:20');
         break;
         
       case 'force_refresh_all':

@@ -976,6 +976,9 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
         console.log('No upcoming matches found.');
       }
       
+      // Before checking finished matches, detect potential thread conversions
+      await this.checkForPotentialThreadConversions();
+      
       // Check for finished matches and create result threads
       console.log('🏁 Checking for finished matches...');
       const finishedMatches = await faceitService.getFinishedMatches(10);
@@ -1781,6 +1784,59 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
     }
   }
 
+  /**
+   * Check for potential thread conversions (INCOMING -> RESULT) based on existing threads and scheduling
+   */
+  async checkForPotentialThreadConversions() {
+    try {
+      console.log('🔍 Checking for potential thread conversions...');
+      
+      // Get all upcoming threads from database
+      const upcomingThreads = await this.db.db.getThreadsByType('upcoming');
+      if (upcomingThreads.length === 0) {
+        return;
+      }
+      
+      const now = Date.now() / 1000; // Unix timestamp
+      let conversionsTriggered = 0;
+      
+      for (const threadRecord of upcomingThreads) {
+        try {
+          // Get match data from the upcoming matches cache or database
+          const match = this.db.upcomingMatches.get(threadRecord.match_id);
+          if (!match || !match.scheduled_at) {
+            continue;
+          }
+          
+          const matchTime = match.scheduled_at;
+          const timeSinceScheduled = now - matchTime;
+          const hoursSinceScheduled = timeSinceScheduled / 3600;
+          
+          // If a match was scheduled more than 2.5 hours ago, check if it might be finished
+          if (hoursSinceScheduled >= 2.5) {
+            console.log(`⚠️ Found potentially finished match with INCOMING thread: ${threadRecord.match_id}`);
+            console.log(`   Scheduled: ${new Date(matchTime * 1000).toISOString()}`);
+            console.log(`   Hours since scheduled: ${hoursSinceScheduled.toFixed(1)}`);
+            
+            // Trigger cache invalidation to force fresh API check
+            console.log(`🔄 Triggering cache invalidation to check if match ${threadRecord.match_id} is finished...`);
+            await timeSensitiveCache.invalidateCacheForEvent('match_transition_check', threadRecord.match_id);
+            conversionsTriggered++;
+          }
+        } catch (threadErr) {
+          console.error(`Error checking thread ${threadRecord.thread_id} for conversion: ${threadErr.message}`);
+        }
+      }
+      
+      if (conversionsTriggered > 0) {
+        console.log(`🔄 Triggered ${conversionsTriggered} potential thread conversion checks`);
+      }
+      
+    } catch (err) {
+      console.error('Error checking for potential thread conversions:', err.message);
+    }
+  }
+  
   /**
    * Create a missing upcoming thread (bypass normal duplication checks)
    */
