@@ -588,7 +588,7 @@ class SlashCommandHandler {
       }
       
       if (canManageChannels || isConfiguredAdmin) {
-        adminCommands.push('`/clear-cache` - Conservative cache cleanup (preserves user data)');
+        adminCommands.push('`/clear-cache` - Clear caches');
         adminCommands.push('`/clean-user-mappings` - Clean user data');
         adminCommands.push('`/clean-rsvp-status` - Clean RSVP data');
         adminCommands.push('`/cleanup-threads` - Clean old threads');
@@ -922,7 +922,12 @@ class SlashCommandHandler {
       if (this.db.matchThreads) this.db.matchThreads = new Map();
       await this.db.reloadMatchThreads();
 
-      // Only clean up expired entries from database caches, don't delete everything
+      // Clear specific API caches that might contain stale team data (for new player detection)
+      await this.db.removeApiCache('team:players'); // Clear team players cache
+      await this.db.removeApiCache('team:data');    // Clear team data cache
+      console.log('🔄 Cleared team data caches to allow detection of new players');
+
+      // Only clean up expired entries from other database caches, don't delete everything
       const expiredApiCacheCleared = await this.db.cleanupExpiredApiCache();
       const expiredMatchesCacheCleared = await this.db.cleanupExpiredCache();
       const expiredTeamDataCacheCleared = await this.db.cleanupExpiredTeamDataCache();
@@ -939,7 +944,7 @@ class SlashCommandHandler {
           },
           {
             name: '🔄 Actions Taken',
-            value: `Cleared volatile caches (upcoming matches, search results)\nReloaded match threads from database\nCleaned expired database entries only`,
+            value: `Cleared volatile caches (upcoming matches, search results)\nCleared team data caches (allows detection of new players)\nReloaded match threads from database\nCleaned expired database entries only`,
             inline: false
           },
           {

@@ -260,17 +260,17 @@ class RsvpService {
           // Match patterns like "✅ **Attending (2):** player1, player2"
           // Using unicode escape sequences for more reliable emoji matching
           const attendingMatch = line.match(/[✅✓].*?\*\*Attending.*?\*\*.*?:\s*(.+)/);
-          if (attendingMatch) {
-            console.log(`✅ Found attending match:`, attendingMatch[1]);
-            extractedRsvps.attending = attendingMatch[1].split(',').map(name => name.trim()).filter(name => name);
-            continue;
-          }
+            if (attendingMatch) {
+              console.log(`✅ Found attending match:`, attendingMatch[1]);
+              extractedRsvps.attending = attendingMatch[1].split(',').map(name => name.trim().replace(/^\*\*\s*/, '')).filter(name => name);
+              continue;
+            }
           
           // Match patterns like "❌ **Not Attending (1):** player3"
           const notAttendingMatch = line.match(/[❌✗×].*?\*\*Not Attending.*?\*\*.*?:\s*(.+)/);
           if (notAttendingMatch) {
             console.log(`❌ Found not attending match:`, notAttendingMatch[1]);
-            extractedRsvps.notAttending = notAttendingMatch[1].split(',').map(name => name.trim()).filter(name => name);
+            extractedRsvps.notAttending = notAttendingMatch[1].split(',').map(name => name.trim().replace(/^\*\*\s*/, '')).filter(name => name);
             continue;
           }
           
@@ -326,13 +326,13 @@ class RsvpService {
               
               if (line.toLowerCase().includes('attending') && !line.toLowerCase().includes('not attending')) {
                 console.log(`✅ Simple attending match:`, namesPart);
-                extractedRsvps.attending = namesPart.split(',').map(name => name.trim()).filter(name => name);
+                extractedRsvps.attending = namesPart.split(',').map(name => name.trim().replace(/^\*\*\s*/, '')).filter(name => name);
               } else if (line.toLowerCase().includes('not attending')) {
                 console.log(`❌ Simple not attending match:`, namesPart);
-                extractedRsvps.notAttending = namesPart.split(',').map(name => name.trim()).filter(name => name);
+                extractedRsvps.notAttending = namesPart.split(',').map(name => name.trim().replace(/^\*\*\s*/, '')).filter(name => name);
               } else if (line.toLowerCase().includes('no response')) {
                 console.log(`⏳ Simple no response match:`, namesPart);
-                extractedRsvps.noResponse = namesPart.split(',').map(name => name.trim()).filter(name => name);
+                extractedRsvps.noResponse = namesPart.split(',').map(name => name.trim().replace(/^\*\*\s*/, '')).filter(name => name);
               }
             }
           }

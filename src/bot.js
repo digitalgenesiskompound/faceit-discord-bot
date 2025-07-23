@@ -383,7 +383,7 @@ class FaceitBot {
       const rsvpSyncResults = await this.discordService.refreshAllRsvpStatuses(true);
       
       // 3. Verify cache health and performance
-      const timeSensitiveCache = require('./src/services/timeSensitiveCacheService');
+      const timeSensitiveCache = require('./services/timeSensitiveCacheService');
       const cacheStatus = await timeSensitiveCache.getCacheStatus();
       
       console.log('📊 Cache verification completed:', {
