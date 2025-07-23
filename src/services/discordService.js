@@ -1786,6 +1786,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
 
   /**
    * Check for potential thread conversions (INCOMING -> RESULT) based on existing threads and scheduling
+   * Enhanced to handle finished matches that need thread conversion after cache clearing
    */
   async checkForPotentialThreadConversions() {
     try {
@@ -1794,17 +1795,58 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       // Get all upcoming threads from database
       const upcomingThreads = await this.db.db.getThreadsByType('upcoming');
       if (upcomingThreads.length === 0) {
+        console.log('No upcoming threads found for conversion checking');
         return;
       }
       
       const now = Date.now() / 1000; // Unix timestamp
       let conversionsTriggered = 0;
+      let directConversions = 0;
       
       for (const threadRecord of upcomingThreads) {
         try {
-          // Get match data from the upcoming matches cache or database
-          const match = this.db.upcomingMatches.get(threadRecord.match_id);
-          if (!match || !match.scheduled_at) {
+          console.log(`🔍 Checking thread ${threadRecord.thread_id} for match ${threadRecord.match_id}`);
+          
+          // First, try to get match data from the upcoming matches cache
+          let match = this.db.upcomingMatches.get(threadRecord.match_id);
+          let isFinishedMatch = false;
+          
+          // If not found in upcoming cache, check the database for finished match data
+          if (!match) {
+            console.log(`Match ${threadRecord.match_id} not found in upcoming cache, checking database for finished match...`);
+            try {
+              const dbMatch = await this.db.db.getMatch(threadRecord.match_id);
+              if (dbMatch && dbMatch.status === 'FINISHED') {
+                console.log(`✅ Found finished match in database: ${threadRecord.match_id}`);
+                match = dbMatch;
+                isFinishedMatch = true;
+              }
+            } catch (dbErr) {
+              console.log(`Could not find match ${threadRecord.match_id} in database: ${dbErr.message}`);
+            }
+          }
+          
+          if (!match) {
+            console.log(`⚠️ No match data found for thread ${threadRecord.match_id}, skipping conversion check`);
+            continue;
+          }
+          
+          // If we found a finished match in database, convert the thread immediately
+          if (isFinishedMatch) {
+            console.log(`🔄 Found FINISHED match with INCOMING thread, converting immediately: ${threadRecord.match_id}`);
+            const convertedThread = await this.convertIncomingToResultThread(match);
+            if (convertedThread) {
+              directConversions++;
+              console.log(`✅ Successfully converted thread for finished match: ${threadRecord.match_id}`);
+            } else {
+              console.error(`❌ Failed to convert thread for finished match: ${threadRecord.match_id}`);
+            }
+            continue;
+          }
+          
+          // For upcoming matches, check if they might be finished based on time
+          if (!match.scheduled_at) {
+            console.log(`Match ${threadRecord.match_id} has no scheduled_at time, skipping time-based check`);
             continue;
           }
           
@@ -1828,8 +1870,16 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
         }
       }
       
+      if (directConversions > 0) {
+        console.log(`✅ Performed ${directConversions} direct thread conversions for finished matches`);
+      }
+      
       if (conversionsTriggered > 0) {
         console.log(`🔄 Triggered ${conversionsTriggered} potential thread conversion checks`);
+      }
+      
+      if (directConversions === 0 && conversionsTriggered === 0) {
+        console.log('No thread conversions needed at this time');
       }
       
     } catch (err) {
