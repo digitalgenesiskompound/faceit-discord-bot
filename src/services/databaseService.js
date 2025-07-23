@@ -442,6 +442,10 @@ class DatabaseService {
   async cleanupExpiredTeamDataCache() {
     return await this.db.cleanupExpiredTeamDataCache();
   }
+
+  async removeApiCache(cacheKey) {
+    return await this.db.removeApiCache(cacheKey);
+  }
 }
 
 module.exports = DatabaseService;
