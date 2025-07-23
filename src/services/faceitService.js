@@ -352,6 +352,27 @@ class FaceitService {
   }
 
   /**
+   * Get match details by match ID - optimized with caching
+   */
+  async getMatchDetails(matchId) {
+    return await this.cache.getCachedData(
+      `match_${matchId}`,
+      async () => {
+        console.log(`🔍 Fetching match details for: ${matchId}`);
+        return await this.makeProtectedApiRequest(
+          `https://open.faceit.com/data/v4/matches/${matchId}`,
+          {},
+          {
+            operation: 'get_match_details',
+            matchId: matchId
+          }
+        );
+      },
+      { ttlMinutes: 30 } // Cache for 30 minutes
+    );
+  }
+
+  /**
    * Get player data by nickname - optimized with caching
    */
   async getPlayerByNickname(nickname) {

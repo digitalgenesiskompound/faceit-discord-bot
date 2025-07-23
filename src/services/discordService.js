@@ -1826,6 +1826,48 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
             }
           }
           
+          // If still not found, try to fetch from FACEIT API as a last resort
+          if (!match) {
+            console.log(`Match ${threadRecord.match_id} not found in database, attempting to fetch from FACEIT API...`);
+            try {
+              const faceitService = require('./faceitService');
+              const apiMatch = await faceitService.getMatchDetails(threadRecord.match_id);
+              if (apiMatch && apiMatch.status === 'FINISHED') {
+                console.log(`✅ Found finished match via FACEIT API: ${threadRecord.match_id}`);
+                match = apiMatch;
+                isFinishedMatch = true;
+                
+                // Save the match to database for future reference
+                try {
+                  const winner = this.determineMatchWinner(apiMatch);
+                  const result = this.formatMatchResult(apiMatch);
+                  
+                  await this.db.db.addOrUpdateMatch({
+                    match_id: apiMatch.match_id,
+                    teams: apiMatch.teams,
+                    scheduled_at: apiMatch.scheduled_at,
+                    competition_name: apiMatch.competition_name || 'FACEIT Match',
+                    status: 'FINISHED'
+                  });
+                  
+                  await this.db.db.updateMatchResult(
+                    apiMatch.match_id,
+                    result,
+                    winner,
+                    apiMatch.finished_at
+                  );
+                  
+                  console.log(`💾 Saved API-fetched match data to database: ${apiMatch.match_id}`);
+                } catch (saveErr) {
+                  console.error(`Failed to save API-fetched match data: ${saveErr.message}`);
+                  // Continue with conversion even if save fails
+                }
+              }
+            } catch (apiErr) {
+              console.log(`Could not fetch match ${threadRecord.match_id} from FACEIT API: ${apiErr.message}`);
+            }
+          }
+          
           if (!match) {
             console.log(`⚠️ No match data found for thread ${threadRecord.match_id}, skipping conversion check`);
             continue;
