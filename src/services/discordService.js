@@ -396,10 +396,8 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         // Check if it's an upcoming thread that needs to be converted to finished
         const hasUpcomingThread = await this.db.hasUpcomingMatchThread(match.match_id);
         if (hasUpcomingThread) {
-          console.log(`🔄 Upcoming thread exists for finished match ${match.match_id}, but not creating duplicate finished thread`);
-          // Note: In a complete implementation, you might want to update the existing thread type
-          // For now, we'll skip creating a new thread to prevent duplicates
-          return;
+          console.log(`🔄 Converting existing INCOMING thread to RESULT thread for match ${match.match_id}`);
+          return await this.convertIncomingToResultThread(match);
         } else {
           console.log(`⚠️ Non-upcoming thread already exists for match ${match.match_id}, skipping finished thread creation`);
           return;
@@ -1673,6 +1671,114 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       () => this.db.hasFinishedMatchThread(matchId),
       true // Use session cache
     );
+  }
+
+  /**
+   * Convert an existing INCOMING thread to a RESULT thread when match finishes
+   */
+  async convertIncomingToResultThread(match) {
+    try {
+      console.log(`🔄 Converting INCOMING thread to RESULT thread for match ${match.match_id}`);
+      
+      if (!match || !match.teams || !match.teams.faction1 || !match.teams.faction2) {
+        console.error('Invalid finished match data for thread conversion');
+        return;
+      }
+
+      // Get the existing upcoming thread
+      const existingThreadId = this.db.matchThreads.get(match.match_id);
+      if (!existingThreadId) {
+        console.error(`No thread found in memory cache for match ${match.match_id}`);
+        return;
+      }
+
+      const existingThread = await this.client.channels.fetch(existingThreadId).catch(() => null);
+      if (!existingThread) {
+        console.error(`Could not fetch existing thread ${existingThreadId} for match ${match.match_id}`);
+        return;
+      }
+
+      console.log(`📍 Found existing thread: ${existingThread.name}`);
+      
+      // Generate new thread name for RESULT
+      const faction1 = match.teams.faction1.name;
+      const faction2 = match.teams.faction2.name;
+      const shortDate = match.finished_at ? new Date(match.finished_at * 1000).toLocaleDateString('en-US', {
+        month: 'short',
+        day: 'numeric',
+        timeZone: 'America/Los_Angeles'
+      }) : 'Unknown';
+      
+      const newThreadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
+      
+      // Update thread name
+      console.log(`🔄 Renaming thread from "${existingThread.name}" to "${newThreadName}"`);
+      await existingThread.setName(newThreadName);
+      
+      // Update thread type in database
+      await this.db.db.run('UPDATE match_threads SET thread_type = ? WHERE match_id = ?', ['finished', match.match_id]);
+      
+      // Save finished match data to database
+      try {
+        const winner = this.determineMatchWinner(match);
+        const result = this.formatMatchResult(match);
+        
+        await this.db.db.addOrUpdateMatch({
+          match_id: match.match_id,
+          teams: match.teams,
+          scheduled_at: match.scheduled_at,
+          competition_name: match.competition_name || 'FACEIT Match',
+          status: 'FINISHED'
+        });
+        
+        await this.db.db.updateMatchResult(
+          match.match_id,
+          result,
+          winner,
+          match.finished_at
+        );
+        
+        console.log(`✅ Saved finished match data to database: ${match.match_id}`);
+      } catch (dbErr) {
+        console.error(`❌ Error saving finished match data to database: ${dbErr.message}`);
+      }
+      
+      // Create and send match result embed to the thread
+      const matchDate = match.finished_at ? new Date(match.finished_at * 1000).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'long', 
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        timeZone: 'America/Los_Angeles'
+      }) : 'Unknown';
+      
+      const winner = this.determineMatchWinner(match);
+      const result = this.formatMatchResult(match);
+      
+      const summaryEmbed = this.createMatchSummaryEmbed(match, winner, result, matchDate);
+      
+      // Add a separator message to indicate the match has finished
+      await existingThread.send('\n═══════════════════════════════════════');
+      await existingThread.send('🏁 **MATCH FINISHED** 🏁');
+      await existingThread.send('═══════════════════════════════════════\n');
+      
+      // Send the match summary
+      await existingThread.send({ embeds: [summaryEmbed] });
+      
+      // Invalidate cache since we changed thread type
+      this.invalidateMatchCache(match.match_id);
+      
+      // Trigger cache invalidation for match finish event
+      await timeSensitiveCache.invalidateCacheForEvent('match_finish', match.match_id);
+      
+      console.log(`✅ Successfully converted INCOMING thread to RESULT thread: ${newThreadName}`);
+      return existingThread;
+      
+    } catch (err) {
+      console.error(`Error converting INCOMING thread to RESULT thread: ${err.message}`);
+      return null;
+    }
   }
 
   /**
