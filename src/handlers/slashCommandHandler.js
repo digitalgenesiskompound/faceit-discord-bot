@@ -901,7 +901,7 @@ class SlashCommandHandler {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-      console.log(`User ${interaction.user.tag} requested cache clear`);
+      console.log(`User ${interaction.user.tag} requested comprehensive cache clear`);
 
       // Get cache sizes before clearing
       const beforeStats = {
@@ -913,28 +913,36 @@ class SlashCommandHandler {
         userSearchResults: this.db.userSearchResults?.size || 0
       };
 
-      // Conservative cache clearing - only clear volatile caches
+      // Step 1: Conservative in-memory cache clearing 
       // DO NOT clear userMappings or rsvpStatus - these are critical for functionality
       if (this.db.upcomingMatches) this.db.upcomingMatches = new Map();
       if (this.db.userSearchResults) this.db.userSearchResults = new Map();
       
       // Clear match threads temporarily and reload from database to ensure consistency
+      // This preserves thread detection while refreshing the cache
       if (this.db.matchThreads) this.db.matchThreads = new Map();
       await this.db.reloadMatchThreads();
+      console.log('🔄 Cleared volatile in-memory caches and reloaded threads from database');
 
-      // Clear specific API caches that might contain stale team data (for new player detection)
-      await this.db.removeApiCache('team:players'); // Clear team players cache
-      await this.db.removeApiCache('team:data');    // Clear team data cache
-      console.log('🔄 Cleared team data caches to allow detection of new players');
+      // Step 2: Force refresh all match-related data caches via time-sensitive cache service
+      const timeSensitiveCache = require('../services/timeSensitiveCacheService');
+      await timeSensitiveCache.forceRefreshMatchData();
+      console.log('🔄 Forced refresh of all match data caches (matches, team data, players)');
 
-      // Only clean up expired entries from other database caches, don't delete everything
+      // Step 3: Clean up expired database cache entries (non-destructive)
       const expiredApiCacheCleared = await this.db.cleanupExpiredApiCache();
       const expiredMatchesCacheCleared = await this.db.cleanupExpiredCache();
       const expiredTeamDataCacheCleared = await this.db.cleanupExpiredTeamDataCache();
+      console.log('🧹 Cleaned up expired database cache entries');
+
+      // Step 4: Trigger RSVP synchronization to update existing threads with fresh data
+      console.log('🔄 Triggering RSVP synchronization for all threads...');
+      const rsvpResults = await this.discordService.refreshAllRsvpStatuses(true); // Silent mode
+      console.log(`📊 RSVP sync completed: ${rsvpResults.processed} threads processed, ${rsvpResults.updated} updated`);
 
       const embed = new EmbedBuilder()
-        .setTitle('🔄 Cache Management Complete')
-        .setDescription('Conservative cache management completed - critical data preserved.')
+        .setTitle('🔄 Comprehensive Cache Clear Complete')
+        .setDescription('Full cache refresh completed - fresh data will be fetched from API and existing threads updated.')
         .setColor(0x00ff00)
         .addFields(
           {
@@ -944,19 +952,19 @@ class SlashCommandHandler {
           },
           {
             name: '🔄 Actions Taken',
-            value: `Cleared volatile caches (upcoming matches, search results)\nCleared team data caches (allows detection of new players)\nReloaded match threads from database\nCleaned expired database entries only`,
+            value: `✅ Cleared volatile memory caches\n✅ Forced refresh of match/team data caches\n✅ Reloaded match threads from database\n✅ Cleaned expired database entries\n✅ Synchronized RSVP status in threads`,
             inline: false
           },
           {
-            name: '🛡️ Data Preserved',
-            value: `User Mappings: ${Object.keys(this.db.userMappings || {}).length}\nRSVP Data: ${Object.keys(this.db.rsvpStatus || {}).length}\nMatch Threads: ${this.db.matchThreads?.size || 0}`,
+            name: '🛡️ Data Preserved & Updated',
+            value: `User Mappings: ${Object.keys(this.db.userMappings || {}).length}\nRSVP Data: ${Object.keys(this.db.rsvpStatus || {}).length}\nMatch Threads: ${this.db.matchThreads?.size || 0}\nRSVP Sync: ${rsvpResults.processed} processed, ${rsvpResults.updated} updated`,
             inline: false
           }
         )
         .setTimestamp();
 
       await interaction.editReply({ embeds: [embed] });
-      console.log(`Cache cleared successfully by ${interaction.user.tag}`);
+      console.log(`Comprehensive cache clear completed successfully by ${interaction.user.tag}`);
 
     } catch (err) {
       console.error(`Error handling /clear-cache command: ${err.message}`);
