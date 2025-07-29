@@ -242,9 +242,27 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
       // Get match data for context
       const match = this.db.upcomingMatches.get(matchId);
       if (!match) {
-        console.log(`Match ${matchId} not found in upcomingMatches cache, attempting simplified update`);
+        console.log(`Match ${matchId} not found in upcomingMatches cache, attempting enhanced update with fresh API data`);
         
-        // Try to update with limited information by finding existing message
+        // Fetch fresh match data from API to get current scheduled time
+        let freshMatch = null;
+        try {
+          const faceitService = require('./faceitService');
+          
+          // Get fresh upcoming matches to find the current match data
+          const upcomingMatches = await faceitService.getUpcomingMatches();
+          freshMatch = upcomingMatches.find(m => m.match_id === matchId);
+          
+          if (freshMatch) {
+            console.log(`🔄 Found fresh match data for ${matchId} with scheduled time: ${freshMatch.scheduled_at}`);
+            // Store it in cache for future use
+            this.db.upcomingMatches.set(matchId, freshMatch);
+          }
+        } catch (error) {
+          console.error(`Error fetching fresh match data for ${matchId}:`, error.message);
+        }
+        
+        // Try to update with existing message
         const messages = await thread.messages.fetch({ limit: 10 });
         const rsvpMessage = messages.find(msg => 
           msg.author.id === this.client.user.id && 
@@ -254,22 +272,49 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         );
         
         if (rsvpMessage) {
-          // Extract existing information from the message
           const existingEmbed = rsvpMessage.embeds[0];
           const existingTitle = existingEmbed.title;
-          const existingDescription = existingEmbed.description;
           
           // Get updated RSVP status
           const rsvpStatus = await this.createDynamicRsvpStatus(matchId);
           
-          // Update just the RSVP section in the description
-          const descriptionParts = existingDescription.split('**Current RSVPs:**\n');
-          let updatedDescription = existingDescription;
-          if (descriptionParts.length === 2) {
-            updatedDescription = descriptionParts[0] + '**Current RSVPs:**\n' + rsvpStatus;
+          let updatedDescription;
+          
+          if (freshMatch) {
+            // Reconstruct the entire description with fresh match data
+            const { formatMatchTime } = require('../utils/helpers');
+            const matchTimes = formatMatchTime(freshMatch.scheduled_at);
+            const matchUrl = `https://www.faceit.com/en/cs2/room/${matchId}`;
+            
+            updatedDescription = `⏰ ${matchTimes.pacific}\n⏰ ${matchTimes.mountain}\n\n🔗 [Join Match Room](${matchUrl})\n\n**Current RSVPs:**\n${rsvpStatus}`;
+            
+            // Update thread name if the match time has changed
+            const faction1 = freshMatch.teams.faction1.name;
+            const faction2 = freshMatch.teams.faction2.name;
+            const newThreadName = `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`;
+            
+            if (thread.name !== newThreadName) {
+              console.log(`🔄 Updating thread name from "${thread.name}" to "${newThreadName}"`);
+              try {
+                await thread.setName(newThreadName);
+                console.log(`✅ Successfully updated thread name to reflect new match time`);
+              } catch (nameError) {
+                console.error(`❌ Failed to update thread name: ${nameError.message}`);
+              }
+            }
+            
+            console.log(`🕐 Updated thread with fresh match time: ${matchTimes.pacific}`);
           } else {
-            // Fallback - append RSVP status
-            updatedDescription = existingDescription + '\n\n**Current RSVPs:**\n' + rsvpStatus;
+            // Fallback to updating just RSVP if we couldn't get fresh match data
+            const existingDescription = existingEmbed.description;
+            const descriptionParts = existingDescription.split('**Current RSVPs:**\n');
+            if (descriptionParts.length === 2) {
+              updatedDescription = descriptionParts[0] + '**Current RSVPs:**\n' + rsvpStatus;
+            } else {
+              updatedDescription = existingDescription + '\n\n**Current RSVPs:**\n' + rsvpStatus;
+            }
+            
+            console.log(`⚠️ Updated thread with existing match time (couldn't fetch fresh data)`);
           }
           
           const updatedEmbed = new EmbedBuilder()
@@ -300,11 +345,15 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
             embeds: [updatedEmbed], 
             components: [rsvpRow]
           });
-          console.log(`Updated RSVP message with simplified status for match ${matchId}`);
+          console.log(`Updated RSVP message with ${freshMatch ? 'fresh' : 'simplified'} status for match ${matchId}`);
         } else {
           console.log(`RSVP message not found for match ${matchId}, creating new RSVP Status message`);
           // Create a new RSVP Status message since it doesn't exist
-          await this.sendSimpleRsvpMessage(thread, { match_id: matchId });
+          if (freshMatch) {
+            await this.sendSimpleRsvpMessage(thread, freshMatch);
+          } else {
+            await this.sendSimpleRsvpMessage(thread, { match_id: matchId });
+          }
         }
         return;
       }
@@ -971,11 +1020,15 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
             console.log(`New match found: ${match.match_id}`);
             await this.sendMatchNotification(match);
           }
+          
+          // Always update upcomingMatches cache with current match data after processing
+          // This ensures we store the latest data for comparison in the next check cycle
+          this.db.upcomingMatches.set(match.match_id, match);
         }
       } else {
         console.log('No upcoming matches found.');
       }
-      
+
       // Before checking finished matches, detect potential thread conversions
       await this.checkForPotentialThreadConversions();
       
