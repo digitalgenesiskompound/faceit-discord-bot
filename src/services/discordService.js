@@ -1692,11 +1692,32 @@ console.log(`🔄 Starting reconciliation of existing threads with conservative 
                   cachedMatch.finished_at
                 );
                 
-                console.log(`💾 Saved cached match data to database for future reference: ${cachedMatch.match_id}`);
-              } catch (saveErr) {
-                console.error(`Failed to save cached match data: ${saveErr.message}`);
-                // Continue with locking even if save fails
+              console.log(`💾 Saved cached match data to database for future reference: ${cachedMatch.match_id}`);
+              
+              // Check if thread title needs correction (has "Unknown" date)
+              if (thread.name.includes('RESULT: Unknown')) {
+                console.log(`🔧 Correcting thread title with proper date for match ${cachedMatch.match_id}`);
+                const correctedDate = new Date(cachedMatch.finished_at * 1000).toLocaleDateString('en-US', {
+                  month: 'short',
+                  day: 'numeric',
+                  timeZone: 'America/Los_Angeles'
+                });
+                const faction1 = cachedMatch.teams.faction1.name;
+                const faction2 = cachedMatch.teams.faction2.name;
+                const correctedThreadName = `RESULT: ${correctedDate} - ${faction1} vs ${faction2}`;
+                
+                try {
+                  await thread.setName(correctedThreadName);
+                  console.log(`✅ Updated thread title from "${thread.name}" to "${correctedThreadName}"`);
+                } catch (nameErr) {
+                  console.error(`❌ Failed to update thread title: ${nameErr.message}`);
+                }
               }
+              
+            } catch (saveErr) {
+              console.error(`Failed to save cached match data: ${saveErr.message}`);
+              // Continue with locking even if save fails
+            }
             } else {
               console.log(`⚠️ No match finish data available for thread ${threadRecord.thread_id} (match: ${threadRecord.match_id})`);
               console.log(`This is likely a legacy thread created before database persistence was implemented.`);
