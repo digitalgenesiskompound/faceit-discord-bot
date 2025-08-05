@@ -17,7 +17,6 @@ RUN npm install --only=production --prefer-offline --no-audit --no-fund --silent
 
 # Copy application source code and database module (changes most frequently, so it's last)
 COPY --chown=node:node src/ ./src/
-COPY --chown=node:node database.js ./database.js
 
 # Create data, logs, and backups directories
 RUN mkdir -p /app/data /app/logs /app/backups && chown -R node:node /app/data /app/logs /app/backups

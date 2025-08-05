@@ -1,4 +1,4 @@
-const databaseInstance = require('../../database');
+const databaseInstance = require('../database/database');
 
 /**
  * Unified Cache Service - Replaces all existing cache services
@@ -14,6 +14,9 @@ class Cache {
       matches: 15,        // Upcoming matches
       finished: 60,       // Finished matches
       players: 30,        // Player data
+      player_stats: 60,   // Player stats (ELO, K/D, etc.)
+      player_history: 30, // Player match history
+      map_stats: 120,     // Map-specific stats (rarely change)
       threads: 5,         // Thread references
       search: 10,         // Search results
       team: 120          // Team data (rarely changes)
@@ -217,6 +220,22 @@ class Cache {
 
   async getUserSearch(query, sourceFunction) {
     return this.get(`search:${query.toLowerCase()}`, sourceFunction, { ttl: this.ttl.search });
+  }
+
+  async getPlayerSearch(query, sourceFunction) {
+    return this.get(`player_search:${query.toLowerCase()}`, sourceFunction, { ttl: this.ttl.search });
+  }
+
+  async getPlayerStats(playerId, game, sourceFunction) {
+    return this.get(`player_stats:${playerId}:${game}`, sourceFunction, { ttl: this.ttl.player_stats });
+  }
+
+  async getPlayerHistory(playerId, game, sourceFunction) {
+    return this.get(`player_history:${playerId}:${game}`, sourceFunction, { ttl: this.ttl.player_history });
+  }
+
+  async getPlayerMapStats(playerId, map, sourceFunction) {
+    return this.get(`player_map_stats:${playerId}:${map}`, sourceFunction, { ttl: this.ttl.map_stats });
   }
 
   /**

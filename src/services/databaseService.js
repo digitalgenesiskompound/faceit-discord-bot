@@ -1,4 +1,4 @@
-const databaseInstance = require('../../database');
+const databaseInstance = require('../database/database');
 
 class DatabaseService {
   constructor() {

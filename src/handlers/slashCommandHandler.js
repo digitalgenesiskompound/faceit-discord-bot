@@ -132,6 +132,15 @@ class SlashCommandHandler {
           .setDescription('Force recovery even if data appears healthy')
           .setRequired(false));
 
+    // Team command
+    const teamCommand = new SlashCommandBuilder()
+      .setName('team')
+      .setDescription('List all registered team players with linked Discord accounts')
+      .addBooleanOption(option =>
+        option.setName('refresh')
+          .setDescription('Force refresh player data from FACEIT API')
+          .setRequired(false));
+
     // Store command definitions
     this.commands.set('matches', matchesCommand);
     this.commands.set('profile', profileCommand);
@@ -152,6 +161,7 @@ class SlashCommandHandler {
     this.commands.set('backup-list', backupListCommand);
     this.commands.set('backup-status', backupStatusCommand);
     this.commands.set('recovery', recoveryCommand);
+    this.commands.set('team', teamCommand);
   }
 
   /**
@@ -254,6 +264,9 @@ class SlashCommandHandler {
           break;
         case 'recovery':
           await this.handleRecoveryCommand(interaction);
+          break;
+        case 'team':
+          await this.handleTeamCommand(interaction);
           break;
         default:
           await interaction.reply({ 
@@ -583,7 +596,7 @@ class SlashCommandHandler {
       .addFields(
         { name: '🎮 Match Commands', value: '`/matches` - View upcoming matches\n`/finishedmatches [limit]` - View recent results', inline: false },
         { name: '👤 Profile Commands', value: '`/profile` - View your linked FACEIT profile\n`/register` - Link your account with one click\n`/link <nickname>` - Link manually (if needed)\n`/unlink` - Unlink your FACEIT account', inline: false },
-        { name: '👥 Team Commands', value: '`/lookup <query>` - Search FACEIT accounts\n`/status [match_id]` - View RSVP status', inline: false },
+        { name: '👥 Team Commands', value: '`/team [refresh]` - List all registered team players\n`/lookup \u003cquery\u003e` - Search FACEIT accounts\n`/status [match_id]` - View RSVP status', inline: false },
         { name: '❓ Other Commands', value: '`/help` - Show this help message', inline: false },
         { name: '💡 Tips', value: '• All responses are private (only you can see them)\n• To clear old messages, refresh Discord or restart the app\n• Use `/register` for the easiest account linking', inline: false }
       )
@@ -1414,6 +1427,231 @@ class SlashCommandHandler {
       console.error(`Error handling /recovery command: ${err.message}`);
       await interaction.editReply('❌ Sorry, there was an error running the recovery system.');
     }
+  }
+
+  /**
+   * Handle /team command with optional data refresh
+   */
+  async handleTeamCommand(interaction) {
+    const refresh = interaction.options?.getBoolean('refresh') || false;
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    try {
+      console.log(`User ${interaction.user.tag} requested team player list${refresh ? ' with refresh' : ''}`);
+      
+      // Fetch all user mappings from the database
+      let userMappings = await this.db.getAllUserMappings();
+      
+      if (userMappings.length === 0) {
+        await interaction.editReply('No registered team players found.');
+        return;
+      }
+
+      // If refresh is requested or data looks stale, refresh from FACEIT API
+      if (refresh || this.shouldRefreshTeamData(userMappings)) {
+        console.log('🔄 Refreshing team player data from FACEIT API...');
+        
+        const refreshEmbed = new EmbedBuilder()
+          .setTitle('🔄 Refreshing Player Data...')
+          .setDescription('Fetching latest stats from FACEIT API, please wait...')
+          .setColor(0xff9500)
+          .setTimestamp();
+        
+        await interaction.editReply({ embeds: [refreshEmbed] });
+        
+        userMappings = await this.refreshTeamPlayerData(userMappings);
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle('👥 Registered Team Players')
+        .setDescription(`Found ${userMappings.length} player(s) with linked Discord accounts:`)
+        .setColor(0xff5500)
+        .setTimestamp();
+
+      // Build the list of players with enhanced data validation
+      let playerList = '';
+      let playersWithValidData = 0;
+      
+      for (const mapping of userMappings) {
+        const discordMention = `<@${mapping.discord_id}>`;
+        const faceitProfile = `[${mapping.faceit_nickname}](https://www.faceit.com/en/players/${mapping.faceit_nickname})`;
+        
+        // Enhanced skill level handling
+        let skillLevel = 'Unranked';
+        let hasValidSkillLevel = false;
+        if (mapping.faceit_skill_level && 
+            mapping.faceit_skill_level !== 'N/A' &&
+            mapping.faceit_skill_level !== 'Unknown' &&
+            mapping.faceit_skill_level !== '0' &&
+            !isNaN(parseInt(mapping.faceit_skill_level))) {
+          skillLevel = `Level ${mapping.faceit_skill_level}`;
+          hasValidSkillLevel = true;
+        }
+        
+        playerList += `**${faceitProfile}** - ${discordMention}\n`;
+        playerList += `🏆 ${skillLevel}`;
+        
+        // Enhanced ELO handling
+        let hasValidElo = false;
+        if (mapping.faceit_elo && 
+            mapping.faceit_elo !== 'N/A' &&
+            mapping.faceit_elo !== 'Unknown' &&
+            mapping.faceit_elo !== '0' &&
+            !isNaN(parseInt(mapping.faceit_elo))) {
+          const elo = parseInt(mapping.faceit_elo);
+          if (elo > 0) {
+            const formattedElo = elo.toLocaleString();
+            playerList += ` (${formattedElo} ELO)`;
+            hasValidElo = true;
+          }
+        }
+        
+        // Enhanced country handling
+        let hasValidCountry = false;
+        if (mapping.country && 
+            mapping.country !== 'Unknown' && 
+            mapping.country !== 'N/A' &&
+            mapping.country.length >= 2) {
+          playerList += ` 🌍 ${mapping.country.toUpperCase()}`;
+          hasValidCountry = true;
+        }
+        
+        // Track players with complete data
+        if (hasValidSkillLevel && hasValidElo) {
+          playersWithValidData++;
+        }
+        
+        playerList += '\n\n';
+      }
+
+      // Split into multiple embeds if the content is too long
+      if (playerList.length > 4000) {
+        playerList = playerList.substring(0, 3900) + '\n\n*... and more players*';
+      }
+
+      embed.setDescription(`Found ${userMappings.length} player(s) with linked Discord accounts:\n\n${playerList}`);
+      
+      // Enhanced footer with data quality info
+      let footerText = `Use /register to link your account • All responses are private`;
+      if (playersWithValidData < userMappings.length) {
+        const incompleteCount = userMappings.length - playersWithValidData;
+        footerText += ` • ${incompleteCount} player(s) with incomplete data`;
+      }
+      if (refresh) {
+        footerText += ` • Data refreshed from FACEIT API`;
+      }
+      
+      embed.setFooter({ text: footerText });
+
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (err) {
+      console.error(`Error handling /team command: ${err.message}`);
+      await interaction.editReply('❌ Sorry, there was an error retrieving the team player list.');
+    }
+  }
+
+  /**
+   * Check if team data should be refreshed based on staleness or incomplete data
+   */
+  shouldRefreshTeamData(userMappings) {
+    const now = Date.now();
+    const staleThreshold = 24 * 60 * 60 * 1000; // 24 hours
+    
+    let staleCount = 0;
+    let incompleteCount = 0;
+    
+    for (const mapping of userMappings) {
+      // Check if data is stale (older than 24 hours)
+      const updatedAt = mapping.updated_at ? new Date(mapping.updated_at).getTime() : 0;
+      if (now - updatedAt > staleThreshold) {
+        staleCount++;
+      }
+      
+      // Check if data is incomplete
+      if (!mapping.faceit_skill_level || 
+          mapping.faceit_skill_level === 'N/A' || 
+          mapping.faceit_skill_level === 'Unknown' ||
+          !mapping.faceit_elo || 
+          mapping.faceit_elo === 'N/A' || 
+          mapping.faceit_elo === 'Unknown') {
+        incompleteCount++;
+      }
+    }
+    
+    // Refresh if more than 30% of data is stale or incomplete
+    const refreshThreshold = Math.ceil(userMappings.length * 0.3);
+    const shouldRefresh = staleCount >= refreshThreshold || incompleteCount >= refreshThreshold;
+    
+    if (shouldRefresh) {
+      console.log(`📊 Team data refresh recommended: ${staleCount} stale, ${incompleteCount} incomplete out of ${userMappings.length} players`);
+    }
+    
+    return shouldRefresh;
+  }
+
+  /**
+   * Refresh team player data from FACEIT API
+   */
+  async refreshTeamPlayerData(userMappings) {
+    const faceitService = require('../services/faceitService');
+    const refreshedMappings = [];
+    
+    for (let i = 0; i < userMappings.length; i++) {
+      const mapping = userMappings[i];
+      
+      try {
+        console.log(`🔄 Refreshing data for player ${i + 1}/${userMappings.length}: ${mapping.faceit_nickname}`);
+        
+        // Fetch fresh data from FACEIT API
+        const freshData = await faceitService.getPlayerByNickname(mapping.faceit_nickname);
+        
+        if (freshData) {
+          // Extract game stats (prefer CS2, fallback to CS:GO)
+          const cs2Stats = freshData.games?.cs2;
+          const csgoStats = freshData.games?.csgo;
+          const gameStats = cs2Stats || csgoStats;
+          
+          if (gameStats) {
+            // Update database with fresh data
+            await this.db.updateUserMappingStats(mapping.discord_id, {
+              faceit_skill_level: gameStats.skill_level || 'Unknown',
+              faceit_elo: gameStats.faceit_elo || 'Unknown',
+              country: freshData.country || 'Unknown'
+            });
+            
+            // Update the mapping object with fresh data
+            refreshedMappings.push({
+              ...mapping,
+              faceit_skill_level: gameStats.skill_level || 'Unknown',
+              faceit_elo: gameStats.faceit_elo || 'Unknown',
+              country: freshData.country || 'Unknown',
+              updated_at: new Date().toISOString()
+            });
+            
+            console.log(`✅ Refreshed ${mapping.faceit_nickname}: Level ${gameStats.skill_level}, ${gameStats.faceit_elo} ELO`);
+          } else {
+            console.log(`⚠️ No game stats found for ${mapping.faceit_nickname}`);
+            refreshedMappings.push(mapping);
+          }
+        } else {
+          console.log(`❌ Could not fetch data for ${mapping.faceit_nickname}`);
+          refreshedMappings.push(mapping);
+        }
+        
+        // Rate limiting: small delay between API calls
+        if (i < userMappings.length - 1) {
+          await new Promise(resolve => setTimeout(resolve, 200));
+        }
+        
+      } catch (error) {
+        console.error(`❌ Error refreshing data for ${mapping.faceit_nickname}: ${error.message}`);
+        refreshedMappings.push(mapping);
+      }
+    }
+    
+    console.log(`🔄 Data refresh completed for ${refreshedMappings.length} players`);
+    return refreshedMappings;
   }
 
   /**

@@ -30,6 +30,12 @@ class ButtonHandler {
       return;
     }
 
+    // Handle analyze enemy buttons
+    if (interaction.customId.startsWith('analyze_enemy_')) {
+      await this.handleAnalyzeEnemyButton(interaction);
+      return;
+    }
+
     // Handle RSVP buttons
     if (!interaction.customId.startsWith('rsvp_')) {
       return;
@@ -301,6 +307,134 @@ class ButtonHandler {
         content: '❌ Sorry, there was an error retrieving RSVP status.', 
         flags: MessageFlags.Ephemeral
       });
+    }
+  }
+  
+  /**
+   * Handle analyze enemy button
+   */
+  async handleAnalyzeEnemyButton(interaction) {
+    try {
+      const faceitService = require('../services/faceitService');
+      const matchId = interaction.customId.split('_')[2];
+      
+      // Immediately defer the reply to prevent timeout
+      await interaction.deferReply({ ephemeral: true });
+      
+      console.log(`🔍 Analyzing enemy team for match: ${matchId}`);
+      
+      // Use the comprehensive enemy team analysis method
+      const analysis = await faceitService.getEnemyTeamAnalysis(matchId);
+      
+      if (!analysis || !analysis.enemyTeam) {
+        await interaction.editReply({ 
+          content: '❌ Unable to analyze enemy team. Match data may not be available.' 
+        });
+        return;
+      }
+      
+      const { enemyTeam, analysis: teamAnalysis } = analysis;
+      
+      // Create the analysis embed
+      const embed = new EmbedBuilder()
+        .setTitle(`🎯 Enemy Team Analysis`)
+        .setDescription(`**Team:** ${enemyTeam.name}\n**Match ID:** ${matchId}`)
+        .setColor(0xff6b35)
+        .setTimestamp();
+      
+      // Add team statistics
+      if (teamAnalysis && teamAnalysis.teamAverages) {
+        embed.addFields({
+          name: '📊 Team Overview',
+          value: [
+            `**Average ELO:** ${teamAnalysis.teamAverages.elo}`,
+            `**Average K/D:** ${teamAnalysis.teamAverages.kdRatio}`,
+            `**Recent Matches:** ${teamAnalysis.teamAverages.matchesPlayed}`,
+            `**Team Win Rate:** ${teamAnalysis.teamAverages.winRate}%`
+          ].join('\n'),
+          inline: false
+        });
+      }
+      
+      // Add team map analysis
+      if (teamAnalysis && teamAnalysis.mapAnalysis) {
+        const { bestMap, worstMap } = teamAnalysis.mapAnalysis;
+        embed.addFields({
+          name: '🗺️ Team Map Performance',
+          value: [
+            `**Best Map:** ${bestMap.map !== 'N/A' ? `${bestMap.map} (${bestMap.avgWinRate}% WR)` : 'N/A'}`,
+            `**Worst Map:** ${worstMap.map !== 'N/A' ? `${worstMap.map} (${worstMap.avgWinRate}% WR)` : 'N/A'}`
+          ].join('\n'),
+          inline: true
+        });
+      }
+      
+      // Add individual player stats with map analysis (limit to avoid embed size limits)
+      if (enemyTeam.players && enemyTeam.players.length > 0) {
+        const playerStats = enemyTeam.players.slice(0, 5).map(player => {
+          const elo = player.faceit_elo || 'N/A';
+const kd = (player.stats && player.stats['Average K/D Ratio']) ? parseFloat(player.stats['Average K/D Ratio']).toFixed(2) : 'N/A';
+          const skillLevel = player.skill_level || 'N/A';
+          const winRate = player.stats && player.stats['Win Rate %'] ? `${player.stats['Win Rate %']}%` : 'N/A';
+          
+          // Find best and worst maps for this player
+          let bestMap = 'N/A';
+          let worstMap = 'N/A';
+          
+          if (player.mapStats && Object.keys(player.mapStats).length > 0) {
+            let bestWinRate = -1;
+            let worstWinRate = 101;
+            
+            Object.entries(player.mapStats).forEach(([map, stats]) => {
+              if (stats.matchesPlayed >= 3) { // Only consider maps with reasonable sample size
+                if (stats.winRate > bestWinRate) {
+                  bestWinRate = stats.winRate;
+                  bestMap = `${map} (${stats.winRate}%)`;
+                }
+                if (stats.winRate < worstWinRate) {
+                  worstWinRate = stats.winRate;
+                  worstMap = `${map} (${stats.winRate}%)`;
+                }
+              }
+            });
+          }
+          
+          return `**${player.nickname}**\n` +
+                 `ELO: ${elo} | Level: ${skillLevel}\n` +
+                 `K/D: ${kd} | Win Rate: ${winRate}\n` +
+                 `Best Map: ${bestMap}\n` +
+                 `Worst Map: ${worstMap}`;
+        }).join('\n\n');
+        
+        embed.addFields({
+          name: '👥 Enemy Players',
+          value: playerStats,
+          inline: false
+        });
+      }
+      
+      
+      // Add footer with additional info
+      embed.setFooter({ 
+        text: `Analysis completed • Players analyzed: ${enemyTeam.players?.length || 0}` 
+      });
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+    } catch (err) {
+      console.error(`Error handling analyze enemy button: ${err.message}`);
+      
+      // Try to edit reply, but fallback to followUp if interaction is already replied to
+      try {
+        await interaction.editReply({ 
+          content: '❌ Sorry, there was an error analyzing the enemy team. Please try again later.' 
+        });
+      } catch (editError) {
+        await interaction.followUp({ 
+          content: '❌ Sorry, there was an error analyzing the enemy team. Please try again later.',
+          ephemeral: true 
+        });
+      }
     }
   }
 

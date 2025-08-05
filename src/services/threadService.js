@@ -1,6 +1,7 @@
 const { formatMatchTime } = require('../utils/helpers');
 const config = require('../config/config');
 const cache = require('./cache');
+const { ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 
 /**
  * Thread Service - Handles Discord thread operations
@@ -45,6 +46,22 @@ class ThreadService {
         type: 11, // GUILD_PUBLIC_THREAD
         reason: `Thread for match: ${faction1} vs ${faction2}`
       });
+
+// Add Analyze button for INCOMING threads
+      if (type === 'upcoming') {
+        const analyzeButtonRow = new ActionRowBuilder()
+          .addComponents(
+            new ButtonBuilder()
+              .setCustomId(`analyze_enemy_${match.match_id}`)
+              .setLabel('Analyze')
+              .setStyle(ButtonStyle.Primary)
+          );
+          
+        await thread.send({
+          content: 'Analyze the enemy team!',
+          components: [analyzeButtonRow]
+        });
+      }
 
       // Store thread reference in database
       await this.db.addMatchThread(match.match_id, thread.id, type);

@@ -181,7 +181,11 @@ class ButtonFactory {
         new ButtonBuilder()
           .setCustomId(`rsvp_status_${matchId}`)
           .setLabel('📋 View RSVPs')
-          .setStyle(ButtonStyle.Secondary)
+          .setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+          .setCustomId(`analyze_enemy_${matchId}`)
+          .setLabel('🎯 Analyze Enemy')
+          .setStyle(ButtonStyle.Primary)
       );
   }
 }

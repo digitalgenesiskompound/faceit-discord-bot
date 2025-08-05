@@ -1,10 +1,10 @@
 const sqlite3 = require('sqlite3').verbose();
 const path = require('path');
-const errorHandler = require('./src/utils/errorHandler');
+const errorHandler = require('../utils/errorHandler');
 
 class Database {
   constructor() {
-    this.dbPath = path.join(__dirname, 'data', 'bot.db');
+    this.dbPath = path.join(__dirname, '../../data', 'bot.db');
     this.db = null;
     this.isInitialized = false;
   }
@@ -403,6 +403,17 @@ class Database {
       stats.country,
       discordId
     ]);
+  }
+
+  // Additional user mapping methods for database queries
+  async getUserMappingByDiscordIdFromDB(discordId) {
+    const query = 'SELECT * FROM user_mappings WHERE discord_id = ?';
+    return this.get(query, [discordId]);
+  }
+
+  async getUserMappingByFaceitIdFromDB(faceitPlayerId) {
+    const query = 'SELECT * FROM user_mappings WHERE faceit_player_id = ?';
+    return this.get(query, [faceitPlayerId]);
   }
 
   // MATCH METHODS

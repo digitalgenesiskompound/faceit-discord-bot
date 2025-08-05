@@ -10,9 +10,11 @@ A Discord bot that automatically monitors your FACEIT team's CS2 matches and pro
 ## Key Features
 
 - **🎯 Automatic Match Detection** - Monitors your team's matches every 30 minutes
-- **💬 Match Threads** - Creates dedicated Discord threads for each match with RSVP buttons
+- **💬 Match Threads** - Creates dedicated Discord threads for each match with RSVP buttons and enemy analysis
 - **🔗 Account Linking** - One-click registration system to link Discord ↔ FACEIT accounts
 - **📊 Match Tracking** - View upcoming/finished matches and player statistics
+- **👥 Team Management** - View all registered players with `/team` command
+- **🔍 Enemy Analysis** - Strategic enemy team analysis directly in match threads
 - **🔧 Admin Tools** - Backup system, cache management, and user administration
 - **🐳 Docker Ready** - Easy deployment with automatic restarts and health monitoring
 
@@ -21,6 +23,7 @@ A Discord bot that automatically monitors your FACEIT team's CS2 matches and pro
 **For Everyone:**
 - `/help` - Show all available commands
 - `/matches` - View upcoming matches
+- `/team` - List all registered team players with Discord accounts
 - `/register` - Link your Discord to FACEIT (one-click)
 - `/profile` - View your linked FACEIT profile
 - `/lookup <player>` - Search FACEIT players
@@ -128,10 +131,17 @@ cp ./data/bot.db ./data/bot.db.backup
 ## How It Works
 
 - **Match Detection**: Checks FACEIT API every 30 minutes for new team matches
-- **Thread Creation**: Creates Discord threads with RSVP buttons for each match
+- **Thread Creation**: Creates Discord threads with RSVP buttons and enemy analysis for each match
 - **Account Linking**: Players use `/register` to link Discord ↔ FACEIT accounts
 - **Data Storage**: SQLite database persists user links and RSVP data
 - **Backup System**: Automatic backups every 6 hours + manual backup commands
+
+## Documentation
+
+For detailed information about specific features:
+- **[Feature Documentation](FEATURES_DOCUMENTATION.md)** - Complete guide to `/team` command and "Analyze" button functionality
+- **[Bot Commands](README.md#commands)** - All available slash commands
+- **[Troubleshooting](README.md#troubleshooting)** - Common issues and solutions
 
 ---
 

@@ -148,27 +148,9 @@ class DiscordService {
         .setColor(0x00ff00)
         .setTimestamp();
       
-      // Create RSVP buttons
-      const rsvpRow = new ActionRowBuilder()
-        .addComponents(
-          new ButtonBuilder()
-            .setCustomId(`rsvp_yes_${match.match_id}`)
-            .setLabel('✅ Attending')
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`rsvp_no_${match.match_id}`)
-            .setLabel('❌ Not Attending')
-            .setStyle(ButtonStyle.Danger)
-        );
-      
-      // Create status button row
-      const statusRow = new ActionRowBuilder()
-        .addComponents(
-          new ButtonBuilder()
-            .setCustomId(`rsvp_status_${match.match_id}`)
-            .setLabel('📋 View RSVPs')
-            .setStyle(ButtonStyle.Secondary)
-        );
+      // Create RSVP buttons with analyze enemy
+      const { ButtonFactory } = require('../utils/embedFactory');
+      const rsvpRow = ButtonFactory.createFullRsvpButtons(match.match_id);
       
       console.log(`Sending notification for match: ${match.match_id} (${faction1} vs ${faction2})`);
       
@@ -180,7 +162,7 @@ class DiscordService {
         const message = await targetChannel.send({
           content: "New match scheduled!",
           embeds: [embed],
-          components: [rsvpRow, statusRow]
+          components: [rsvpRow]
         });
         
         // Create a standalone thread in the channel (not attached to the message)
@@ -255,22 +237,9 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         .setTimestamp()
         .setFooter({ text: `Match ID: ${match.match_id}` });
       
-      // Add RSVP buttons
-      const rsvpRow = new ActionRowBuilder()
-        .addComponents(
-          new ButtonBuilder()
-            .setCustomId(`rsvp_yes_${match.match_id}`)
-            .setLabel('✅ Attending')
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`rsvp_no_${match.match_id}`)
-            .setLabel('❌ Not Attending')
-            .setStyle(ButtonStyle.Danger),
-          new ButtonBuilder()
-            .setCustomId(`rsvp_status_${match.match_id}`)
-            .setLabel('📋 View RSVPs')
-            .setStyle(ButtonStyle.Secondary)
-        );
+      // Add RSVP buttons with Analyze Enemy
+      const { ButtonFactory } = require('../utils/embedFactory');
+      const rsvpRow = ButtonFactory.createFullRsvpButtons(match.match_id);
       
       await thread.send({ 
         embeds: [rsvpEmbed], 
@@ -392,22 +361,9 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
             .setTimestamp()
             .setFooter({ text: `Match ID: ${matchId}` });
           
-          // Create updated button row
-          const rsvpRow = new ActionRowBuilder()
-            .addComponents(
-              new ButtonBuilder()
-                .setCustomId(`rsvp_yes_${matchId}`)
-                .setLabel('✅ Attending')
-                .setStyle(ButtonStyle.Success),
-              new ButtonBuilder()
-                .setCustomId(`rsvp_no_${matchId}`)
-                .setLabel('❌ Not Attending')
-                .setStyle(ButtonStyle.Danger),
-              new ButtonBuilder()
-                .setCustomId(`rsvp_status_${matchId}`)
-                .setLabel('📋 View RSVPs')
-                .setStyle(ButtonStyle.Secondary)
-            );
+          // Create updated button row with Analyze Enemy
+          const { ButtonFactory } = require('../utils/embedFactory');
+          const rsvpRow = ButtonFactory.createFullRsvpButtons(matchId);
           
           await rsvpMessage.edit({ 
             embeds: [updatedEmbed], 
