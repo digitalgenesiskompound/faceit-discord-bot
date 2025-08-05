@@ -398,22 +398,9 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         .setTimestamp()
         .setFooter({ text: `Match ID: ${match.match_id}` });
       
-      // Create updated button row
-      const rsvpRow = new ActionRowBuilder()
-        .addComponents(
-          new ButtonBuilder()
-            .setCustomId(`rsvp_yes_${match.match_id}`)
-            .setLabel('✅ Attending')
-            .setStyle(ButtonStyle.Success),
-          new ButtonBuilder()
-            .setCustomId(`rsvp_no_${match.match_id}`)
-            .setLabel('❌ Not Attending')
-            .setStyle(ButtonStyle.Danger),
-          new ButtonBuilder()
-            .setCustomId(`rsvp_status_${match.match_id}`)
-            .setLabel('📋 View RSVPs')
-            .setStyle(ButtonStyle.Secondary)
-        );
+      // Create updated button row with Analyze Enemy
+      const { ButtonFactory } = require('../utils/embedFactory');
+      const rsvpRow = ButtonFactory.createFullRsvpButtons(match.match_id);
       
       // Find the RSVP message in the thread (should be the first bot message)
       const messages = await thread.messages.fetch({ limit: 10 });
