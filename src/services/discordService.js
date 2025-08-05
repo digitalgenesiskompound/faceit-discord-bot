@@ -2,7 +2,7 @@ const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('
 const { formatMatchTime } = require('../utils/helpers');
 const config = require('../config/config');
 const cache = require('./cache');
-const RsvpService = require('./rsvpSimple');
+const RsvpService = require('./rsvpService');
 const ThreadService = require('./threadService');
 const MatchService = require('./matchService');
 const embedService = require('./embedService');
@@ -1314,32 +1314,185 @@ console.log(`🔄 Starting reconciliation of existing threads with conservative 
   }
 
   /**
-   * Clean up stale thread references by validating all stored threads
+   * Comprehensive cleanup of stale thread references and related data
+   * Enhanced to validate all threads and clean up orphaned database entries
    */
   async cleanupStaleThreads() {
     try {
-      console.log('🧹 Cleaning up stale thread references...');
-      const staleThreads = [];
+      console.log('🧹 Starting comprehensive thread cleanup and validation...');
+      
+      const cleanupResults = {
+        memoryStaleThreads: 0,
+        databaseStaleThreads: 0,
+        orphanedMatches: 0,
+        orphanedRsvps: 0,
+        validatedThreads: 0,
+        errors: []
+      };
+      
+      // Phase 1: Validate memory cache threads
+      console.log('📋 Phase 1: Validating memory cache thread references...');
+      const memoryStaleThreads = [];
       
       for (const [matchId, threadId] of this.db.matchThreads.entries()) {
-        const isValid = await this.validateThread(threadId);
-        if (!isValid) {
-          staleThreads.push({ matchId, threadId });
+        try {
+          const validationResult = await this.validateThread(matchId, threadId);
+          if (!validationResult.isValid && validationResult.shouldRemove) {
+            memoryStaleThreads.push({ matchId, threadId, reason: validationResult.reason });
+          } else {
+            cleanupResults.validatedThreads++;
+            console.log(`✅ Validated thread: ${matchId} -> ${threadId}`);
+          }
+        } catch (validationErr) {
+          console.error(`Error validating thread ${threadId} for match ${matchId}: ${validationErr.message}`);
+          cleanupResults.errors.push(`Validation error for ${matchId}: ${validationErr.message}`);
         }
       }
       
-      // Remove stale thread references
-      for (const { matchId, threadId } of staleThreads) {
-        console.log(`Removing stale thread reference: ${threadId} for match ${matchId}`);
+      // Remove stale threads from memory and database
+      for (const { matchId, threadId, reason } of memoryStaleThreads) {
+        console.log(`🗑️ Removing stale thread reference: ${threadId} for match ${matchId} (${reason})`);
         this.db.matchThreads.delete(matchId);
         await this.db.removeMatchThread(matchId);
+        cleanupResults.memoryStaleThreads++;
       }
       
-      console.log(`✅ Cleaned up ${staleThreads.length} stale thread references`);
-      return staleThreads.length;
+      // Phase 2: Check database for orphaned thread references not in memory
+      console.log('📋 Phase 2: Checking database for orphaned thread references...');
+      const allDbThreads = await this.db.db.getAllMatchThreads();
+      const memoryMatchIds = new Set(this.db.matchThreads.keys());
+      
+      for (const dbThread of allDbThreads) {
+        if (!memoryMatchIds.has(dbThread.match_id)) {
+          console.log(`🔍 Found database thread not in memory: ${dbThread.match_id} -> ${dbThread.thread_id}`);
+          
+          // Try to validate this thread directly
+          try {
+            const thread = await this.client.channels.fetch(dbThread.thread_id).catch(() => null);
+            if (!thread) {
+              console.log(`🗑️ Removing orphaned database thread reference: ${dbThread.match_id} -> ${dbThread.thread_id}`);
+              await this.db.removeMatchThread(dbThread.match_id);
+              cleanupResults.databaseStaleThreads++;
+            } else {
+              // Thread exists in Discord but not in memory - restore to memory
+              console.log(`🔄 Restoring valid thread to memory cache: ${dbThread.match_id} -> ${dbThread.thread_id}`);
+              this.db.matchThreads.set(dbThread.match_id, dbThread.thread_id);
+              cleanupResults.validatedThreads++;
+            }
+          } catch (checkErr) {
+            console.error(`Error checking orphaned thread ${dbThread.thread_id}: ${checkErr.message}`);
+            // If we can't validate it, assume it's stale and remove it
+            await this.db.removeMatchThread(dbThread.match_id);
+            cleanupResults.databaseStaleThreads++;
+            cleanupResults.errors.push(`Orphaned thread check error for ${dbThread.match_id}: ${checkErr.message}`);
+          }
+        }
+      }
+      
+      // Phase 3: Clean up orphaned match data (matches with no threads that should have them)
+      console.log('📋 Phase 3: Checking for orphaned match data...');
+      try {
+        // Get all matches from database that have no thread references
+        const allMatches = await this.db.db.all('SELECT match_id, status FROM matches');
+        const threadsMatchIds = new Set((await this.db.db.getAllMatchThreads()).map(t => t.match_id));
+        
+        for (const match of allMatches) {
+          if (!threadsMatchIds.has(match.match_id)) {
+            // Check if this match is old and can be cleaned up
+            const matchData = await this.db.db.getMatch(match.match_id);
+            if (matchData) {
+              const isOldFinished = matchData.status === 'FINISHED' && matchData.finished_at && 
+                                   (Date.now() / 1000 - matchData.finished_at) > (7 * 24 * 60 * 60); // 7 days
+              
+              if (isOldFinished) {
+                console.log(`🗑️ Cleaning up old finished match data: ${match.match_id}`);
+                // Remove associated RSVP data first
+                await this.db.db.run('DELETE FROM rsvp_status WHERE match_id = ?', [match.match_id]);
+                // Remove match data
+                await this.db.db.run('DELETE FROM matches WHERE match_id = ?', [match.match_id]);
+                // Remove from processed matches
+                await this.db.db.run('DELETE FROM processed_matches WHERE match_id = ?', [match.match_id]);
+                cleanupResults.orphanedMatches++;
+              }
+            }
+          }
+        }
+      } catch (matchCleanupErr) {
+        console.error(`Error during match data cleanup: ${matchCleanupErr.message}`);
+        cleanupResults.errors.push(`Match cleanup error: ${matchCleanupErr.message}`);
+      }
+      
+      // Phase 4: Clean up orphaned RSVP data (RSVPs for matches that no longer exist)
+      console.log('📋 Phase 4: Cleaning up orphaned RSVP data...');
+      try {
+        // Modified query: Only remove RSVPs for matches that have neither match data NOR thread references
+        // This prevents deleting RSVPs for valid matches that just lack match table entries
+        const orphanedRsvpQuery = `
+          DELETE FROM rsvp_status 
+          WHERE match_id NOT IN (SELECT match_id FROM matches)
+          AND match_id NOT IN (SELECT match_id FROM match_threads)
+        `;
+        const rsvpResult = await this.db.db.run(orphanedRsvpQuery);
+        cleanupResults.orphanedRsvps = rsvpResult.changes || 0;
+        
+        if (cleanupResults.orphanedRsvps > 0) {
+          console.log(`🗑️ Cleaned up ${cleanupResults.orphanedRsvps} truly orphaned RSVP entries`);
+          // Clear RSVP memory cache to stay in sync
+          this.db.rsvpStatus = {};
+          // Reload RSVP data
+          const rsvpData = await this.db.db.getAllRsvpData();
+          for (const rsvp of rsvpData) {
+            if (!this.db.rsvpStatus[rsvp.match_id]) {
+              this.db.rsvpStatus[rsvp.match_id] = {};
+            }
+            this.db.rsvpStatus[rsvp.match_id][rsvp.discord_id] = {
+              response: rsvp.response,
+              faceit_nickname: rsvp.faceit_nickname,
+              timestamp: rsvp.created_at
+            };
+          }
+        }
+      } catch (rsvpCleanupErr) {
+        console.error(`Error during RSVP cleanup: ${rsvpCleanupErr.message}`);
+        cleanupResults.errors.push(`RSVP cleanup error: ${rsvpCleanupErr.message}`);
+      }
+      
+      // Phase 5: Clean up expired cache entries
+      console.log('📋 Phase 5: Cleaning up expired cache entries...');
+      try {
+        await this.db.cleanupExpiredApiCache();
+        await this.db.cleanupExpiredCache();
+        await this.db.cleanupExpiredTeamDataCache();
+      } catch (cacheCleanupErr) {
+        console.error(`Error during cache cleanup: ${cacheCleanupErr.message}`);
+        cleanupResults.errors.push(`Cache cleanup error: ${cacheCleanupErr.message}`);
+      }
+      
+      // Summary
+      console.log('✅ Comprehensive thread cleanup completed:');
+      console.log(`   - Memory stale threads removed: ${cleanupResults.memoryStaleThreads}`);
+      console.log(`   - Database stale threads removed: ${cleanupResults.databaseStaleThreads}`);
+      console.log(`   - Orphaned matches cleaned: ${cleanupResults.orphanedMatches}`);
+      console.log(`   - Orphaned RSVPs cleaned: ${cleanupResults.orphanedRsvps}`);
+      console.log(`   - Threads validated: ${cleanupResults.validatedThreads}`);
+      console.log(`   - Errors encountered: ${cleanupResults.errors.length}`);
+      
+      if (cleanupResults.errors.length > 0) {
+        console.log('⚠️ Cleanup errors:');
+        cleanupResults.errors.forEach(error => console.log(`   - ${error}`));
+      }
+      
+      return cleanupResults;
     } catch (err) {
-      console.error(`Error during thread cleanup: ${err.message}`);
-      return 0;
+      console.error(`Error during comprehensive thread cleanup: ${err.message}`);
+      return {
+        memoryStaleThreads: 0,
+        databaseStaleThreads: 0,
+        orphanedMatches: 0,
+        orphanedRsvps: 0,
+        validatedThreads: 0,
+        errors: [err.message]
+      };
     }
   }
 

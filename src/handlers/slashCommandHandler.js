@@ -123,6 +123,15 @@ class SlashCommandHandler {
       .setName('backup-status')
       .setDescription('Show backup service status and statistics (admin only)');
 
+    // Recovery command (admin only)
+    const recoveryCommand = new SlashCommandBuilder()
+      .setName('recovery')
+      .setDescription('Run data recovery from Discord content and logs (admin only)')
+      .addBooleanOption(option =>
+        option.setName('force')
+          .setDescription('Force recovery even if data appears healthy')
+          .setRequired(false));
+
     // Store command definitions
     this.commands.set('matches', matchesCommand);
     this.commands.set('profile', profileCommand);
@@ -142,6 +151,7 @@ class SlashCommandHandler {
     this.commands.set('backup-create', backupCreateCommand);
     this.commands.set('backup-list', backupListCommand);
     this.commands.set('backup-status', backupStatusCommand);
+    this.commands.set('recovery', recoveryCommand);
   }
 
   /**
@@ -241,6 +251,9 @@ class SlashCommandHandler {
           break;
         case 'backup-status':
           await this.handleBackupStatusCommand(interaction);
+          break;
+        case 'recovery':
+          await this.handleRecoveryCommand(interaction);
           break;
         default:
           await interaction.reply({ 
@@ -595,6 +608,7 @@ class SlashCommandHandler {
         adminCommands.push('`/backup-create` - Create manual backup');
         adminCommands.push('`/backup-list` - List all backups');
         adminCommands.push('`/backup-status` - Show backup status');
+        adminCommands.push('`/recovery [force]` - Run data recovery system');
       }
       
       if (adminCommands.length > 0) {
@@ -1092,20 +1106,49 @@ class SlashCommandHandler {
     await interaction.deferReply({ flags: MessageFlags.Ephemeral });
 
     try {
-      await this.discordService.cleanupStaleThreads();
+      console.log(`User ${interaction.user.tag} requested comprehensive thread cleanup`);
+      
+      const cleanupResults = await this.discordService.cleanupStaleThreads();
       
       const embed = new EmbedBuilder()
-        .setTitle('✅ Thread Cleanup Complete')
-        .setDescription('Successfully cleaned up stale match threads.')
-        .setColor(0x00ff00)
+        .setTitle('🧹 Comprehensive Thread Cleanup Complete')
+        .setDescription('Multi-phase cleanup and validation completed successfully.')
+        .setColor(cleanupResults.errors.length > 0 ? 0xffaa00 : 0x00ff00)
+        .addFields(
+          {
+            name: '🗑️ Cleanup Results',
+            value: `Memory stale threads: ${cleanupResults.memoryStaleThreads}\nDatabase stale threads: ${cleanupResults.databaseStaleThreads}\nOrphaned matches: ${cleanupResults.orphanedMatches}\nOrphaned RSVPs: ${cleanupResults.orphanedRsvps}`,
+            inline: true
+          },
+          {
+            name: '✅ Validation Results', 
+            value: `Threads validated: ${cleanupResults.validatedThreads}\nErrors encountered: ${cleanupResults.errors.length}`,
+            inline: true
+          },
+          {
+            name: '📋 Cleanup Phases',
+            value: `✅ Memory cache validation\n✅ Database orphan cleanup\n✅ Match data cleanup\n✅ RSVP data cleanup\n✅ Cache cleanup`,
+            inline: false
+          }
+        )
         .setTimestamp();
 
+      if (cleanupResults.errors.length > 0) {
+        const errorSummary = cleanupResults.errors.slice(0, 3).join('\n');
+        const moreErrors = cleanupResults.errors.length > 3 ? `\n... and ${cleanupResults.errors.length - 3} more` : '';
+        embed.addFields({
+          name: '⚠️ Errors Encountered',
+          value: `\`\`\`\n${errorSummary}${moreErrors}\n\`\`\``,
+          inline: false
+        });
+      }
+
       await interaction.editReply({ embeds: [embed] });
-      console.log(`Thread cleanup completed by ${interaction.user.tag}`);
+      console.log(`Comprehensive thread cleanup completed by ${interaction.user.tag}:`, cleanupResults);
 
     } catch (err) {
       console.error(`Error handling /cleanup-threads command: ${err.message}`);
-      await interaction.editReply('❌ Sorry, there was an error cleaning up threads.');
+      await interaction.editReply('❌ Sorry, there was an error during comprehensive thread cleanup.');
     }
   }
 
@@ -1282,6 +1325,94 @@ class SlashCommandHandler {
     } catch (err) {
       console.error(`Error handling /backup-status command: ${err.message}`);
       await interaction.editReply('❌ Sorry, there was an error getting backup status.');
+    }
+  }
+
+  /**
+   * Handle /recovery command (admin only)
+   */
+  async handleRecoveryCommand(interaction) {
+    if (!this.checkAdminPermissions(interaction)) return;
+
+    await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+    try {
+      console.log(`User ${interaction.user.tag} requested data recovery`);
+      const forceRecovery = interaction.options.getBoolean('force') || false;
+
+      // Initialize recovery service
+      const RecoveryService = require('../services/recoveryService');
+      const recoveryService = new RecoveryService(this.db, this.discordService);
+      
+      let needsRecovery = { required: false, reasons: [] };
+      
+      if (forceRecovery) {
+        needsRecovery = { required: true, reasons: ['Forced recovery via admin command'] };
+      } else {
+        // Check if recovery is needed
+        const userMappingCount = Object.keys(this.db.userMappings || {}).length;
+        const rsvpCount = Object.keys(this.db.rsvpStatus || {}).length;
+        
+        if (userMappingCount === 0) {
+          needsRecovery.reasons.push('No user mappings found');
+        }
+        if (rsvpCount === 0) {
+          needsRecovery.reasons.push('No RSVP data found');
+        }
+        
+        needsRecovery.required = needsRecovery.reasons.length > 0;
+      }
+      
+      if (!needsRecovery.required) {
+        const embed = new EmbedBuilder()
+          .setTitle('✅ No Recovery Needed')
+          .setDescription('Database appears healthy - recovery is not required.')
+          .addFields(
+            { name: '📊 Current State', value: `User Mappings: ${Object.keys(this.db.userMappings || {}).length}\nRSVP Data: ${Object.keys(this.db.rsvpStatus || {}).length}`, inline: false },
+            { name: '💡 Tip', value: 'Use the `force` option to run recovery anyway if needed.', inline: false }
+          )
+          .setColor(0x00ff00)
+          .setTimestamp();
+        
+        await interaction.editReply({ embeds: [embed] });
+        return;
+      }
+      
+      // Run recovery process
+      const embed = new EmbedBuilder()
+        .setTitle('🔄 Running Data Recovery...')
+        .setDescription('Please wait while the recovery system analyzes Discord content and logs.')
+        .addFields(
+          { name: '📋 Recovery Reasons', value: needsRecovery.reasons.join('\n'), inline: false }
+        )
+        .setColor(0xff9500)
+        .setTimestamp();
+      
+      await interaction.editReply({ embeds: [embed] });
+      
+      // Perform the recovery
+      const recoveryResults = await recoveryService.performFullRecovery();
+      
+      // Update with results
+      const resultEmbed = new EmbedBuilder()
+        .setTitle('✅ Data Recovery Complete')
+        .setDescription('Recovery process completed successfully!')
+        .addFields(
+          { name: '👥 User Mappings', value: `Recovered: ${recoveryResults.userMappings.recovered}\nTotal: ${recoveryResults.userMappings.total}`, inline: true },
+          { name: '📝 RSVP Data', value: `Recovered: ${recoveryResults.rsvpData.recovered}\nTotal: ${recoveryResults.rsvpData.total}`, inline: true },
+          { name: '📋 Interaction Logs', value: `Processed: ${recoveryResults.interactionLogs.processed}\nRecovered: ${recoveryResults.interactionLogs.recovered}`, inline: true },
+          { name: '⏱️ Duration', value: `${recoveryResults.duration || 'N/A'}ms`, inline: true },
+          { name: '📊 Sources Used', value: recoveryResults.sources ? recoveryResults.sources.join(', ') : 'Discord messages, interaction logs', inline: false }
+        )
+        .setColor(0x00ff00)
+        .setTimestamp();
+      
+      await interaction.editReply({ embeds: [resultEmbed] });
+      console.log(`Recovery completed by ${interaction.user.tag}:`, recoveryResults);
+      
+    } catch (err) {
+      console.error(`Error handling /recovery command: ${err.message}`);
+      await interaction.editReply('❌ Sorry, there was an error running the recovery system.');
     }
   }
 
