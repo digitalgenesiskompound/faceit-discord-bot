@@ -106,6 +106,17 @@ data/
 *.sqlite3
 backups/
 
+# Backup and temporary files
+Dockerfile.backup
+restore-backup.js
+*.backup
+*.bak
+*.tmp
+*.temp
+*.old
+*.orig
+*~
+
 # CI/CD and development files
 .github/
 .gitlab-ci.yml

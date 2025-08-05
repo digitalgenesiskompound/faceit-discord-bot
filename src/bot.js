@@ -7,6 +7,7 @@ const config = require('./config/config');
 const DatabaseService = require('./services/databaseService');
 const DiscordService = require('./services/discordService');
 const BackupService = require('./services/backupService');
+const RecoveryService = require('./services/recoveryService');
 const faceitService = require('./services/faceitService');
 const errorHandler = require('./utils/errorHandler');
 
@@ -53,6 +54,9 @@ class FaceitBot {
         // Initialize database
         await this.db.initialize();
         console.log('✅ Database service initialized');
+        
+        // Run recovery system if needed
+        await this.runRecoveryIfNeeded();
         
         // Clear all caches on startup
         await this.clearCachesOnStartup();
@@ -271,6 +275,81 @@ await this.db.reloadMatchThreads();
     }
   }
   
+  /**
+   * Run recovery system if needed (checks for missing/incomplete data)
+   */
+  async runRecoveryIfNeeded() {
+    try {
+      console.log('🔍 Checking if recovery is needed...');
+      
+      // Initialize recovery service
+      const recoveryService = new RecoveryService(this.db, this.discordService);
+      
+      // Check if recovery is needed by examining database state
+      const needsRecovery = await this.assessRecoveryNeeds();
+      
+      if (needsRecovery.required) {
+        console.log('🔄 Recovery needed, running recovery system...');
+        console.log(`   Reasons: ${needsRecovery.reasons.join(', ')}`);
+        
+        // Run recovery process
+        const recoveryResults = await recoveryService.performComprehensiveRecovery();
+        
+        console.log('✅ Recovery completed:', {
+          userMappings: recoveryResults.userMappings,
+          rsvpData: recoveryResults.rsvpData,
+          interactionLogs: recoveryResults.interactionLogs
+        });
+        
+      } else {
+        console.log('✅ No recovery needed - database appears healthy');
+      }
+      
+    } catch (error) {
+      console.error('❌ Error during recovery assessment/execution:', error.message);
+      console.log('⚠️ Bot will continue without recovery. Check logs for details.');
+      // Don't throw - let bot continue even if recovery fails
+    }
+  }
+  
+  /**
+   * Assess whether recovery is needed based on database state
+   */
+  async assessRecoveryNeeds() {
+    const reasons = [];
+    
+    try {
+      // Check user mappings
+      const userMappingCount = Object.keys(this.db.userMappings || {}).length;
+      if (userMappingCount === 0) {
+        reasons.push('No user mappings found');
+      }
+      
+      // Check recent RSVP data
+      const rsvpCount = Object.keys(this.db.rsvpStatus || {}).length;
+      if (rsvpCount === 0) {
+        reasons.push('No RSVP data found');
+      }
+      
+      // Check if environment variable forces recovery
+      if (process.env.FORCE_RECOVERY === 'true') {
+        reasons.push('Forced recovery via environment variable');
+      }
+      
+      return {
+        required: reasons.length > 0,
+        reasons
+      };
+      
+    } catch (error) {
+      console.error('Error assessing recovery needs:', error.message);
+      return {
+        required: false,
+        reasons: ['Error during assessment']
+      };
+    }
+  }
+
   /**
    * Check for backup restoration before starting the bot
    */

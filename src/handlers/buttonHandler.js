@@ -1,5 +1,6 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const config = require('../config/config');
+const InteractionLogService = require('../services/recovery/interactionLogService');
 
 class ButtonHandler {
   constructor(client, databaseService, discordService, slashCommandHandler = null) {
@@ -7,6 +8,9 @@ class ButtonHandler {
     this.db = databaseService;
     this.discordService = discordService;
     this.slashCommandHandler = slashCommandHandler;
+    
+    // Initialize interaction logging
+    this.interactionLog = new InteractionLogService(databaseService);
   }
 
   /**
@@ -102,6 +106,15 @@ class ButtonHandler {
       
       // Update thread RSVP status immediately (synchronous for better UX)
       await this.discordService.updateThreadRsvpStatus(matchId, interaction.channel);
+      
+      // Log this interaction for recovery purposes
+      await this.interactionLog.logRsvpAction(
+        matchId, 
+        userId, 
+        interaction.user.username, 
+        response, 
+        userMapping.faceit_nickname
+      );
       
       console.log(`RSVP ${actionText} via button: ${interaction.user.tag} (${userMapping.faceit_nickname}) -> ${response} for match ${matchId}`);
       
