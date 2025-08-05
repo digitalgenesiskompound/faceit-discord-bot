@@ -1665,6 +1665,43 @@ console.log(`🔄 Starting reconciliation of existing threads with conservative 
             // Use stored finish time from database
             matchFinishTime = matchData.finished_at * 1000; // Convert to milliseconds
             console.log(`Using stored finish time for match ${threadRecord.match_id}: ${new Date(matchFinishTime).toLocaleString()}`);
+            
+            // Check if thread title needs correction (has "Unknown" date) even with stored data
+            if (thread.name.includes('RESULT: Unknown')) {
+              console.log(`🔧 Correcting thread title with stored database date for match ${threadRecord.match_id}`);
+              const correctedDate = new Date(matchData.finished_at * 1000).toLocaleDateString('en-US', {
+                month: 'short',
+                day: 'numeric',
+                timeZone: 'America/Los_Angeles'
+              });
+              
+              // Extract team names from stored match data or thread name
+              let faction1, faction2;
+              if (matchData.faction1_name && matchData.faction2_name) {
+                faction1 = matchData.faction1_name;
+                faction2 = matchData.faction2_name;
+              } else {
+                // Extract from thread name as fallback
+                const nameMatch = thread.name.match(/RESULT: Unknown - (.+) vs (.+)/);
+                if (nameMatch) {
+                  faction1 = nameMatch[1];
+                  faction2 = nameMatch[2];
+                } else {
+                  console.warn(`Could not extract team names from thread: ${thread.name}`);
+                  faction1 = 'Team1';
+                  faction2 = 'Team2';
+                }
+              }
+              
+              const correctedThreadName = `RESULT: ${correctedDate} - ${faction1} vs ${faction2}`;
+              
+              try {
+                await thread.setName(correctedThreadName);
+                console.log(`✅ Updated thread title from "${thread.name}" to "${correctedThreadName}"`);
+              } catch (nameErr) {
+                console.error(`❌ Failed to update thread title: ${nameErr.message}`);
+              }
+            }
           } else {
             // No stored match data - check if we have it in the cached finished matches
             const cachedMatch = finishedMatchLookup.get(threadRecord.match_id);
