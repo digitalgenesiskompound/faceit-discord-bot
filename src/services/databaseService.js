@@ -1,5 +1,4 @@
 const databaseInstance = require('../../database');
-const { databaseLockManager } = require('../utils/databaseLock');
 
 class DatabaseService {
   constructor() {
@@ -110,33 +109,50 @@ class DatabaseService {
   }
 
   async addUserMapping(discordId, discordUsername, faceitData) {
-    return await databaseLockManager.withLock('user_mappings', async () => {
-      // Add to database
-      await this.db.addUserMapping(discordId, discordUsername, faceitData);
-      
-      // Update memory cache
-      this.userMappings[discordId] = {
-        discord_username: discordUsername,
-        discord_id: discordId,
-        faceit_nickname: faceitData.nickname,
-        faceit_player_id: faceitData.player_id,
-        faceit_skill_level: faceitData.skill_level || 'N/A',
-        faceit_elo: faceitData.faceit_elo || 'N/A',
-        country: faceitData.country || 'Unknown',
-        registered_at: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      };
+    const previousState = this.userMappings[discordId] || null;
+    
+    // Add to database
+    await this.db.addUserMapping(discordId, discordUsername, faceitData);
+    
+    // Update memory cache
+    const newMapping = {
+      discord_username: discordUsername,
+      discord_id: discordId,
+      faceit_nickname: faceitData.nickname,
+      faceit_player_id: faceitData.player_id,
+      faceit_skill_level: faceitData.skill_level || 'N/A',
+      faceit_elo: faceitData.faceit_elo || 'N/A',
+      country: faceitData.country || 'Unknown',
+      registered_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
+    };
+    
+    this.userMappings[discordId] = newMapping;
+    
+    // Log user mapping addition
+    console.log(`User mapping ${previousState ? 'updated' : 'added'}:`, {
+      discordUsername,
+      faceitNickname: faceitData.nickname,
+      skillLevel: faceitData.skill_level
     });
   }
 
   async removeUserMapping(discordId) {
-    return await databaseLockManager.withLock('user_mappings', async () => {
-      // Remove from database
-      await this.db.removeUserMapping(discordId);
-      
-      // Update memory cache
-      delete this.userMappings[discordId];
-    });
+    const previousMapping = this.userMappings[discordId];
+    
+    // Remove from database
+    await this.db.removeUserMapping(discordId);
+    
+    // Update memory cache
+    delete this.userMappings[discordId];
+    
+    // Log user mapping removal
+    if (previousMapping) {
+      console.log('User mapping removed:', {
+        discordUsername: previousMapping.discord_username,
+        faceitNickname: previousMapping.faceit_nickname
+      });
+    }
   }
 
   findUserByQuery(query) {
@@ -151,23 +167,39 @@ class DatabaseService {
    * Update user mapping stats with fresh FACEIT data
    */
   async updateUserMappingStats(discordId, stats) {
-    return await databaseLockManager.withLock('user_mappings', async () => {
-      try {
-        // Update database
-        await this.db.updateUserMappingStats(discordId, stats);
+    try {
+      const previousState = this.userMappings[discordId] ? { ...this.userMappings[discordId] } : null;
+      
+      // Update database
+      await this.db.updateUserMappingStats(discordId, stats);
+      
+      // Update memory cache
+      if (this.userMappings[discordId]) {
+        this.userMappings[discordId].faceit_skill_level = stats.faceit_skill_level || this.userMappings[discordId].faceit_skill_level;
+        this.userMappings[discordId].faceit_elo = stats.faceit_elo || this.userMappings[discordId].faceit_elo;
+        this.userMappings[discordId].country = stats.country || this.userMappings[discordId].country;
+        this.userMappings[discordId].updated_at = new Date().toISOString();
         
-        // Update memory cache
-        if (this.userMappings[discordId]) {
-          this.userMappings[discordId].faceit_skill_level = stats.faceit_skill_level || this.userMappings[discordId].faceit_skill_level;
-          this.userMappings[discordId].faceit_elo = stats.faceit_elo || this.userMappings[discordId].faceit_elo;
-          this.userMappings[discordId].country = stats.country || this.userMappings[discordId].country;
-          this.userMappings[discordId].updated_at = new Date().toISOString();
+        // Log stats update with details of what changed
+        const changedFields = [];
+        if (previousState && previousState.faceit_skill_level !== this.userMappings[discordId].faceit_skill_level) {
+          changedFields.push(`skill level: ${previousState.faceit_skill_level} → ${this.userMappings[discordId].faceit_skill_level}`);
         }
-      } catch (err) {
-        console.error(`Error updating user mapping stats: ${err.message}`);
-        throw err;
+        if (previousState && previousState.faceit_elo !== this.userMappings[discordId].faceit_elo) {
+          changedFields.push(`ELO: ${previousState.faceit_elo} → ${this.userMappings[discordId].faceit_elo}`);
+        }
+        
+        if (changedFields.length > 0) {
+          console.log(`User stats updated:`, {
+            faceitNickname: this.userMappings[discordId].faceit_nickname,
+            changes: changedFields
+          });
+        }
       }
-    });
+    } catch (err) {
+      console.error(`Error updating user mapping stats: ${err.message}`);
+      throw err;
+    }
   }
 
   // RSVP methods
@@ -180,28 +212,37 @@ class DatabaseService {
   }
 
   async addRsvp(matchId, discordId, response, faceitNickname) {
-    return await databaseLockManager.withLock(`rsvp_${matchId}`, async () => {
-      // Add to database
-      await this.db.addRsvp(matchId, discordId, response, faceitNickname);
-      
-      // Update memory cache
-      if (!this.rsvpStatus[matchId]) {
-        this.rsvpStatus[matchId] = {};
-      }
-      this.rsvpStatus[matchId][discordId] = {
-        response,
-        faceit_nickname: faceitNickname,
-        timestamp: new Date().toISOString()
-      };
-      
-      // Trigger cache invalidation for RSVP update
-      try {
-        const timeSensitiveCache = require('./timeSensitiveCacheService');
-        await timeSensitiveCache.invalidateCacheForEvent('rsvp_update', matchId);
-      } catch (cacheErr) {
-        console.warn(`Failed to invalidate cache for RSVP update: ${cacheErr.message}`);
-      }
+    const previousResponse = this.rsvpStatus[matchId]?.[discordId] || null;
+    
+    // Add to database
+    await this.db.addRsvp(matchId, discordId, response, faceitNickname);
+    
+    // Update memory cache
+    if (!this.rsvpStatus[matchId]) {
+      this.rsvpStatus[matchId] = {};
+    }
+    
+    const newRsvp = {
+      response,
+      faceit_nickname: faceitNickname,
+      timestamp: new Date().toISOString()
+    };
+    
+    this.rsvpStatus[matchId][discordId] = newRsvp;
+    
+    // Log RSVP addition/change
+    const isUpdate = !!previousResponse;
+    const responseChanged = previousResponse && previousResponse.response !== response;
+    
+    console.log(`RSVP ${isUpdate ? (responseChanged ? 'changed' : 'reconfirmed') : 'added'}:`, {
+      matchId,
+      faceitNickname,
+      response,
+      discordId
     });
+    
+    // Note: RSVP updates don't require match data cache invalidation
+    // The optimized cache service handles RSVP data separately from match data
   }
 
   // Processed matches methods
@@ -238,11 +279,22 @@ class DatabaseService {
 
   async addMatchThread(matchId, threadId, threadType = 'upcoming') {
     try {
+      const previousThreadId = this.matchThreads.get(matchId);
+      
       // Add to database
       await this.db.addMatchThread(matchId, threadId, threadType);
       
       // Update memory cache
       this.matchThreads.set(matchId, threadId);
+      
+      // Log thread creation/update
+      console.log(`Match thread ${previousThreadId ? 'updated' : 'created'}:`, {
+        matchId,
+        threadId,
+        threadType,
+        previousThreadId
+      });
+      
     } catch (err) {
       console.error(`Error adding match thread: ${err.message}`);
     }
@@ -280,11 +332,22 @@ class DatabaseService {
    */
   async removeMatchThread(matchId) {
     try {
+      const previousThreadId = this.matchThreads.get(matchId);
+      
       // Remove from database
       await this.db.removeMatchThread(matchId);
       
       // Remove from memory cache
       this.matchThreads.delete(matchId);
+      
+      // Log thread removal
+      if (previousThreadId) {
+        console.log('Match thread reference removed:', {
+          matchId,
+          removedThreadId: previousThreadId,
+          reason: 'cleanup_or_validation'
+        });
+      }
       
       console.log(`Removed thread reference for match ${matchId}`);
     } catch (err) {

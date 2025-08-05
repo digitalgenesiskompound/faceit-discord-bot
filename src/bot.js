@@ -6,13 +6,9 @@ const http = require('http');
 const config = require('./config/config');
 const DatabaseService = require('./services/databaseService');
 const DiscordService = require('./services/discordService');
-const NotificationService = require('./services/notificationService');
 const BackupService = require('./services/backupService');
 const faceitService = require('./services/faceitService');
 const errorHandler = require('./utils/errorHandler');
-const rateLimiter = require('./utils/rateLimiter');
-const { circuitBreakerManager } = require('./utils/circuitBreaker');
-const { performanceMonitor } = require('./utils/performanceMonitor');
 
 // Import handlers
 const ButtonHandler = require('./handlers/buttonHandler');
@@ -32,7 +28,6 @@ class FaceitBot {
     this.db = new DatabaseService();
     this.backupService = new BackupService();
     this.discordService = new DiscordService(this.client, this.db);
-    this.notificationService = new NotificationService(this.client, this.db);
     
     // Initialize handlers
     this.slashCommandHandler = new (require('./handlers/slashCommandHandler'))(this.client, this.db, this.discordService, this.backupService);
@@ -63,9 +58,7 @@ class FaceitBot {
         await this.clearCachesOnStartup();
         console.log('✅ Startup cache clearing completed');
         
-        // Initialize notification service
-        this.notificationService.initialize();
-        console.log('✅ Notification service initialized');
+        // Services initialized successfully
         
         // Initialize backup service (non-blocking)
         try {
@@ -166,6 +159,63 @@ class FaceitBot {
   }
 
   /**
+   * Perform conservative thread validation on startup
+   * Only removes threads that are definitively invalid to prevent data loss
+   */
+  async performStartupThreadValidation() {
+    try {
+      console.log('🔍 Starting conservative thread validation on startup...');
+      
+      const loadedThreads = this.db.matchThreads.size;
+      console.log(`📊 Validating ${loadedThreads} reloaded thread references`);
+      
+      let validatedCount = 0;
+      let removedCount = 0;
+      let retainedCount = 0;
+      
+      // Create array from Map to avoid modification during iteration
+      const threadEntries = Array.from(this.db.matchThreads.entries());
+      
+      for (const [matchId, threadId] of threadEntries) {
+        try {
+          const validationResult = await this.discordService.validateThread(matchId, threadId);
+          validatedCount++;
+          
+          if (!validationResult.isValid && validationResult.shouldRemove) {
+            console.warn(`⚠️ [STARTUP VALIDATION] Removing invalid thread reference: ${matchId} -> ${threadId}`);
+            console.warn(`   Reason: ${validationResult.reason}`);
+            await this.db.removeMatchThread(matchId);
+            removedCount++;
+          } else if (!validationResult.isValid) {
+            console.log(`ℹ️ [STARTUP VALIDATION] Retaining questionable thread reference: ${matchId} -> ${threadId}`);
+            console.log(`   Reason: ${validationResult.reason}`);
+            retainedCount++;
+          } else {
+            console.log(`✅ [STARTUP VALIDATION] Thread reference validated: ${matchId} -> ${threadId}`);
+          }
+          
+          // Proceed immediately for faster startup validation
+          
+        } catch (validationError) {
+          console.error(`❌ [STARTUP VALIDATION] Error validating thread ${threadId}: ${validationError.message}`);
+          // Conservative approach: retain thread on validation error
+          retainedCount++;
+        }
+      }
+      
+      console.log('✅ Conservative thread validation completed:');
+      console.log(`   - Total validated: ${validatedCount}`);
+      console.log(`   - Removed (invalid): ${removedCount}`);
+      console.log(`   - Retained (uncertain): ${retainedCount}`);
+      console.log(`   - Final thread count: ${this.db.matchThreads.size}`);
+      
+    } catch (error) {
+      console.error('❌ Error during startup thread validation:', error.message);
+      // Continue startup even if validation fails
+    }
+  }
+  
+  /**
    * Conservative cache management on startup - only clear volatile caches, preserve critical data
    */
   async clearCachesOnStartup() {
@@ -189,7 +239,10 @@ class FaceitBot {
       
       // Clear match threads temporarily and reload from database to ensure consistency
       if (this.db.matchThreads) this.db.matchThreads = new Map();
-      await this.db.reloadMatchThreads();
+await this.db.reloadMatchThreads();
+    
+    // Perform conservative thread validation on startup
+    await this.performStartupThreadValidation();
       
       // Only clean up expired entries from database caches, don't delete everything
       await this.db.cleanupExpiredApiCache();
@@ -262,12 +315,19 @@ class FaceitBot {
       // (since we're doing this at startup)
       await this.backupService.restoreFromBackup(backupPath, false);
       
-      console.log('✅ Database restored successfully from backup');
-      console.log('🔄 Clearing restoration environment variables...');
-      
-      // Clear the environment variables to prevent repeated restoration
-      delete process.env.RESTORE_BACKUP_ON_START;
-      delete process.env.RESTORE_BACKUP_FILE;
+        console.log('✅ Database restored successfully from backup');
+        console.log('🔄 Clearing restoration environment variables...');
+        
+        // Log the restoration as a safe data recovery action
+        console.log('📊 [SAFE RESTORATION] Backup restoration completed successfully');
+        console.log(`   - Source: ${restoreBackupFile}`);
+        console.log(`   - Action: Database restored from backup at startup`);
+        console.log(`   - Reason: Environment variable RESTORE_BACKUP_ON_START=true`);
+        console.log(`   - Impact: All database data replaced with backup content`);
+        
+        // Clear the environment variables to prevent repeated restoration
+        delete process.env.RESTORE_BACKUP_ON_START;
+        delete process.env.RESTORE_BACKUP_FILE;
       
     } catch (error) {
       console.error(`❌ Failed to restore backup: ${error.message}`);
@@ -328,13 +388,8 @@ class FaceitBot {
         retryCount: error.retryCount
       });
       
-      // Notify about API failures if they persist
-      if (error.circuitBreakerKey === 'faceit_api') {
-        await this.notificationService.notifyApiFailure('FACEIT API', error, {
-          operation: 'scheduled_match_check',
-          timestamp: new Date().toISOString()
-        });
-      }
+      // Log API failures
+      console.error('API failure during match check:', error.message);
     }
   }
 
@@ -356,16 +411,8 @@ class FaceitBot {
         retryCount: error.retryCount
       });
       
-      // Notify about persistent database issues
-      if (error.operationName) {
-        await this.notificationService.notifyDatabaseFailure(
-          'scheduled_cleanup',
-          error,
-          {
-            timestamp: new Date().toISOString()
-          }
-        );
-      }
+      // Log database issues
+      console.error('Database failure during cleanup:', error.message);
     }
   }
   
@@ -383,8 +430,8 @@ class FaceitBot {
       const rsvpSyncResults = await this.discordService.refreshAllRsvpStatuses(true);
       
       // 3. Verify cache health and performance
-      const timeSensitiveCache = require('./services/timeSensitiveCacheService');
-      const cacheStatus = await timeSensitiveCache.getCacheStatus();
+      const cache = require('./services/cache');
+      const cacheStats = cache.getStats();
       
       console.log('📊 Cache verification completed:', {
         rsvpSync: {
@@ -392,9 +439,11 @@ class FaceitBot {
           updated: rsvpSyncResults.updated,
           errors: rsvpSyncResults.errors
         },
-        cacheStatus: {
-          period: cacheStatus.period,
-          proactiveChecking: cacheStatus.isProactiveCheckingEnabled
+        cacheStats: {
+          hits: cacheStats.hits,
+          misses: cacheStats.misses,
+          hitRate: cacheStats.hitRate,
+          memorySize: cacheStats.memorySize
         }
       });
       
@@ -402,7 +451,7 @@ class FaceitBot {
       errorHandler.logger.info('Periodic cache verification completed', {
         rsvpUpdates: rsvpSyncResults.updated,
         rsvpErrors: rsvpSyncResults.errors,
-        cachePeriod: cacheStatus.period,
+        cacheHitRate: cacheStats.hitRate,
         timestamp: new Date().toISOString()
       });
       
@@ -428,9 +477,7 @@ class FaceitBot {
           database_ready: this.db.isReady,
           uptime: process.uptime(),
           version: '3.0.0-slash-commands-enhanced',
-          performance: performanceMonitor.getStats(),
-          circuitBreakers: circuitBreakerManager.getAllStatus(),
-          rateLimiter: rateLimiter.getStatus()
+          // Basic health metrics
         };
         
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -440,9 +487,6 @@ class FaceitBot {
       
       if (req.url === '/metrics') {
         const metrics = {
-          performance: performanceMonitor.getStats(),
-          circuitBreakers: circuitBreakerManager.getAllStatus(),
-          rateLimiter: rateLimiter.getStatus(),
           memory: process.memoryUsage(),
           timestamp: new Date().toISOString()
         };
@@ -499,20 +543,7 @@ class FaceitBot {
         this.healthServer.close();
       }
       
-      console.log('🚦 Clearing rate limiter queues...');
-      rateLimiter.clear();
-      
-      console.log('🔧 Resetting circuit breakers...');
-      circuitBreakerManager.resetAll();
-      
-      console.log('🔐 Releasing database locks...');
-      const { databaseLockManager } = require('./utils/databaseLock');
-      databaseLockManager.releaseAllLocks();
-      
-      if (this.notificationService) {
-        console.log('📢 Shutting down notification service...');
-        this.notificationService.shutdown();
-      }
+      // Simplified shutdown process
       
       if (this.backupService) {
         console.log('💾 Shutting down backup service...');

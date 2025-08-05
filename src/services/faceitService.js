@@ -1,57 +1,37 @@
 const { makeApiRequest } = require('../utils/helpers');
 const config = require('../config/config');
-const cacheService = require('./cacheService');
-const timeSensitiveCache = require('./timeSensitiveCacheService');
+const cache = require('./cache');
 const databaseInstance = require('../../database');
-const { circuitBreakerManager } = require('../utils/circuitBreaker');
-const { performanceMonitor, withTimeout } = require('../utils/performanceMonitor');
 
 class FaceitService {
   constructor() {
-    this.cache = cacheService;
+    this.cache = cache;
     this.db = databaseInstance;
     
     // Track ongoing requests to prevent duplicates
     this.pendingRequests = new Map();
     
-    // Use enhanced circuit breaker system
-    this.circuitBreakerService = 'faceit_api';
   }
 
   /**
-   * Get circuit breaker status
-   */
-  getCircuitBreakerStatus() {
-    return circuitBreakerManager.getBreaker(this.circuitBreakerService).getStatus();
-  }
-
-  /**
-   * Make API request with circuit breaker protection and timeout
+   * Make API request with simple error handling
    */
   async makeProtectedApiRequest(url, options, context) {
     const operationType = context?.operation || 'faceit_api_call';
+    console.log(`🌐 Making API request: ${operationType}`);
     
-    // Create fallback function for circuit breaker
-    const fallback = () => {
-      console.warn(`Circuit breaker fallback for ${operationType}`);
-      throw new Error(`FACEIT API temporarily unavailable (circuit breaker open)`);
-    };
-    
-    return await performanceMonitor.timeOperation(operationType, async () => {
-      return await circuitBreakerManager.execute(
-        this.circuitBreakerService,
-        withTimeout(async () => {
-          return await makeApiRequest(url, options, context);
-        }, 15000, `FACEIT API request timeout for ${operationType}`),
-        fallback
-      );
-    });
+    try {
+      return await makeApiRequest(url, options, context);
+    } catch (error) {
+      console.error(`❌ API request failed for ${operationType}:`, error.message);
+      throw error;
+    }
   }
   /**
    * Get upcoming matches for the team
    */
   async getUpcomingMatches() {
-    return await timeSensitiveCache.getUpcomingMatchesTimeAware(async () => {
+    return await this.cache.getUpcomingMatches(async () => {
       const matches = [];
       const matchIds = new Set();
       
@@ -102,7 +82,7 @@ class FaceitService {
       if (matches.length === 0) {
         console.log(`No matches found in championship, trying single player fallback...`);
         try {
-          const teamData = await timeSensitiveCache.getTeamDataTimeAware(async () => {
+          const teamData = await this.cache.getTeamData('team_data', async () => {
             return await this.makeProtectedApiRequest(
               `https://open.faceit.com/data/v4/teams/${config.faceit.teamId}`,
               {},
@@ -141,20 +121,16 @@ class FaceitService {
               // Check each match (with caching)
               for (const match of upcomingMatches) {
                 if (!matchIds.has(match.match_id)) {
-                  const fullMatch = await this.cache.getCachedData(
-                    `match_${match.match_id}`,
-                    async () => {
-                      return await this.makeProtectedApiRequest(
-                        `https://open.faceit.com/data/v4/matches/${match.match_id}`,
-                        {},
-                        {
-                          operation: 'get_full_match_data',
-                          matchId: match.match_id
-                        }
-                      );
-                    },
-                    { ttlMinutes: 10 }
-                  );
+                  const fullMatch = await this.cache.getMatchDetails(match.match_id, async () => {
+                    return await this.makeProtectedApiRequest(
+                      `https://open.faceit.com/data/v4/matches/${match.match_id}`,
+                      {},
+                      {
+                        operation: 'get_full_match_data',
+                        matchId: match.match_id
+                      }
+                    );
+                  });
                   
                   if (fullMatch && fullMatch.teams) {
                     const faction1Id = fullMatch.teams.faction1?.faction_id;
@@ -183,7 +159,7 @@ class FaceitService {
    * Get team players
    */
   async listTeamPlayers() {
-    return await timeSensitiveCache.getTeamPlayersTimeAware(async () => {
+    return await this.cache.getTeamData('team_players', async () => {
       console.log('📊 Fetching team players from API...');
       const teamData = await this.makeProtectedApiRequest(
         `https://open.faceit.com/data/v4/teams/${config.faceit.teamId}`,
@@ -207,7 +183,7 @@ class FaceitService {
    * Get finished matches for the team - optimized with caching
    */
   async getFinishedMatches(limit = 20) {
-    return await timeSensitiveCache.getFinishedMatchesTimeAware(async () => {
+    return await this.cache.getFinishedMatches(async () => {
       const finishedMatches = [];
       const matchIds = new Set();
       
@@ -265,7 +241,7 @@ class FaceitService {
       if (finishedMatches.length < limit) {
         console.log(`🔍 Checking player history for additional finished matches (found ${finishedMatches.length}/${limit} so far)...`);
         try {
-          const teamData = await timeSensitiveCache.getTeamDataTimeAware(async () => {
+          const teamData = await this.cache.getTeamData('team_data_finished', async () => {
             return await this.makeProtectedApiRequest(
               `https://open.faceit.com/data/v4/teams/${config.faceit.teamId}`,
               {},
@@ -305,20 +281,16 @@ class FaceitService {
               // Check each match to see if it's a team match we haven't found yet
               for (const match of playerFinishedMatches.slice(0, 10)) {
                 if (!matchIds.has(match.match_id) && finishedMatches.length < limit) {
-                  const fullMatch = await this.cache.getCachedData(
-                    `match_${match.match_id}`,
-                    async () => {
-                      return await this.makeProtectedApiRequest(
-                        `https://open.faceit.com/data/v4/matches/${match.match_id}`,
-                        {},
-                        {
-                          operation: 'get_full_finished_match_data',
-                          matchId: match.match_id
-                        }
-                      );
-                    },
-                    { ttlMinutes: 10 }
-                  );
+                  const fullMatch = await this.cache.getMatchDetails(match.match_id, async () => {
+                    return await this.makeProtectedApiRequest(
+                      `https://open.faceit.com/data/v4/matches/${match.match_id}`,
+                      {},
+                      {
+                        operation: 'get_full_finished_match_data',
+                        matchId: match.match_id
+                      }
+                    );
+                  });
                   
                   if (fullMatch && fullMatch.teams) {
                     const faction1Id = fullMatch.teams.faction1?.faction_id;
@@ -355,28 +327,24 @@ class FaceitService {
    * Get match details by match ID - optimized with caching
    */
   async getMatchDetails(matchId) {
-    return await this.cache.getCachedData(
-      `match_${matchId}`,
-      async () => {
-        console.log(`🔍 Fetching match details for: ${matchId}`);
-        return await this.makeProtectedApiRequest(
-          `https://open.faceit.com/data/v4/matches/${matchId}`,
-          {},
-          {
-            operation: 'get_match_details',
-            matchId: matchId
-          }
-        );
-      },
-      { ttlMinutes: 30 } // Cache for 30 minutes
-    );
+    return await this.cache.getMatchDetails(matchId, async () => {
+      console.log(`🔍 Fetching match details for: ${matchId}`);
+      return await this.makeProtectedApiRequest(
+        `https://open.faceit.com/data/v4/matches/${matchId}`,
+        {},
+        {
+          operation: 'get_match_details',
+          matchId: matchId
+        }
+      );
+    });
   }
 
   /**
    * Get player data by nickname - optimized with caching
    */
   async getPlayerByNickname(nickname) {
-    return await timeSensitiveCache.getPlayerDataTimeAware(nickname, async () => {
+    return await this.cache.getPlayerData(nickname, async () => {
       console.log(`👤 Fetching player data for: ${nickname}`);
       return await this.makeProtectedApiRequest(
         `https://open.faceit.com/data/v4/players`,
@@ -395,7 +363,7 @@ class FaceitService {
    * Search for FACEIT accounts - now with optimized caching
    */
   async searchFaceitAccounts(query) {
-    return await timeSensitiveCache.getPlayerSearchTimeAware(query, async () => {
+    return await this.cache.getPlayerSearch(query, async () => {
       try {
         console.log(`🔍 Searching for FACEIT accounts with query: ${query}`);
         
@@ -432,7 +400,6 @@ class FaceitService {
    */
   cleanup() {
     this.cache.cleanup();
-    timeSensitiveCache.cleanup();
     this.pendingRequests.clear();
   }
 }

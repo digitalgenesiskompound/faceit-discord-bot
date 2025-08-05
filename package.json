@@ -6,7 +6,8 @@
   "scripts": {
     "start": "node src/bot.js",
     "dev": "node src/bot.js",
-    "test": "echo \"No tests specified\""
+    "test": "node tests/parseNamesList.test.js",
+    "test:rsvp": "node tests/parseNamesList.test.js"
   },
   "dependencies": {
     "axios": "^1.5.0",

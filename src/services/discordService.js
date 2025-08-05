@@ -1,10 +1,15 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
 const { formatMatchTime } = require('../utils/helpers');
 const config = require('../config/config');
-const RsvpService = require('./rsvpService');
-const errorHandler = require('../utils/errorHandler');
+const cache = require('./cache');
+const RsvpService = require('./rsvpSimple');
+const ThreadService = require('./threadService');
+const MatchService = require('./matchService');
+const embedService = require('./embedService');
 const RescheduleHandler = require('../utils/rescheduleHandler');
-const timeSensitiveCache = require('./timeSensitiveCacheService');
+const dataValidationService = require('../utils/dataValidationService');
+const comprehensiveLogger = require('../utils/comprehensiveLogger');
+
 class DiscordService {
   constructor(client, databaseService) {
     this.client = client;
@@ -16,12 +21,20 @@ class DiscordService {
     // Initialize reschedule handler
     this.rescheduleHandler = new RescheduleHandler(databaseService, this);
     
-    // Query cache to reduce redundant database operations
+    // Initialize FACEIT service for data validation
+    this.faceitService = require('./faceitService');
+    
+    // Optimized query cache to reduce redundant database operations
     this.queryCache = {
       matchThreads: new Map(), // Cache for match thread lookups
-      lastCacheReset: Date.now(),
-      cacheTTL: 5 * 60 * 1000, // 5 minutes TTL for cache
       sessionCache: new Map() // Per-session cache that lasts for one checkMatches cycle
+    };
+    
+    // Use consistent TTL values across the service
+    this.cacheTTL = {
+      short: 5 * 60 * 1000,   // 5 minutes
+      medium: 15 * 60 * 1000, // 15 minutes
+      long: 30 * 60 * 1000    // 30 minutes
     };
   }
   
@@ -36,8 +49,7 @@ class DiscordService {
         console.log('🔄 Starting RSVP status refresh for all INCOMING threads...');
       }
       
-      // Clear RSVP cache to force fresh comparisons
-      this.rsvpService.clearRsvpCache();
+      // Force fresh RSVP comparisons
       
       // Use the RSVP service to check and update all threads
       const results = await this.rsvpService.checkAllIncomingThreadsForMismatches(this);
@@ -76,6 +88,42 @@ class DiscordService {
         return;
       }
       
+      // Use enhanced data validation for robust data comparison
+      const freshMatch = await this.faceitService.getMatchDetails(match.match_id);
+      const cachedMatch = this.db.upcomingMatches.get(match.match_id);
+      
+      const reconciliation = await dataValidationService.performDataReconciliation({
+        freshData: freshMatch,
+        existingData: cachedMatch,
+        context: 'sendMatchNotification',
+        matchId: match.match_id
+      });
+      
+      if (reconciliation.action === 'skip') {
+        // Log validation skip for notification
+        comprehensiveLogger.logSkip('match_notification', match, {
+          matchId: match.match_id,
+          origin: comprehensiveLogger.origins.VALIDATION,
+          reasoning: `Notification skipped: ${reconciliation.reason}`,
+          context: {
+            validationAction: reconciliation.action,
+            confidence: reconciliation.confidence,
+            notificationType: 'sendMatchNotification'
+          },
+          validationIssues: reconciliation.issues,
+          existingState: cachedMatch
+        });
+        
+        console.log(`📊 Skipping notification based on data validation: ${reconciliation.reason}`);
+        if (reconciliation.issues.length > 0) {
+          console.warn(`Issues detected: ${reconciliation.issues.join(', ')}`);
+        }
+        return;
+      }
+      
+      // Use the validated data for notifications
+      const validatedMatch = reconciliation.dataUsed || match;
+
       // Check if we already have ANY thread for this match (upcoming or finished) - use fresh query for new notifications
       const hasAnyExistingThread = await this.db.hasAnyMatchThread(match.match_id);
       if (hasAnyExistingThread) {
@@ -146,11 +194,27 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         // Store thread reference for this match using the database service
         await this.db.addMatchThread(match.match_id, thread.id, 'upcoming');
         
+        // Log thread creation event
+        comprehensiveLogger.logThreadTransition(match.match_id, 'created', {
+          origin: comprehensiveLogger.origins.DISCORD,
+          reasoning: 'New upcoming match thread created for Discord notification',
+          context: {
+            threadType: 'upcoming',
+            faction1: faction1,
+            faction2: faction2,
+            matchTime: matchTimes.mountain,
+            notificationChannel: targetChannel.name
+          },
+          previousState: null,
+          newState: 'upcoming_thread',
+          threadId: thread.id,
+          threadName: thread.name
+        });
+        
         // Invalidate cache since we just added a new thread
         this.invalidateMatchCache(match.match_id);
         
-        // Trigger cache invalidation for thread creation event
-        await timeSensitiveCache.invalidateCacheForEvent('thread_created', match.match_id);
+      // Cache invalidation for thread creation is handled by the unified cache
         
         // Send a simple RSVP status message to the thread
         await this.sendSimpleRsvpMessage(thread, match);
@@ -225,6 +289,11 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
    */
   async updateThreadRsvpStatus(matchId, thread = null) {
     try {
+      console.log(`🔄 Updating RSVP status for match ${matchId}`);
+      
+      // Get match data - use cached version for faster updates
+      const match = this.db.upcomingMatches.get(matchId);
+
       if (!thread) {
         const threadId = this.db.matchThreads.get(matchId);
         if (!threadId) {
@@ -239,8 +308,7 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         return;
       }
       
-      // Get match data for context
-      const match = this.db.upcomingMatches.get(matchId);
+      // Check if we have match data, if not try to fetch fresh data
       if (!match) {
         console.log(`Match ${matchId} not found in upcomingMatches cache, attempting enhanced update with fresh API data`);
         
@@ -462,12 +530,20 @@ name: `INCOMING: ${matchTimes.mountain} - ${faction1} vs ${faction2}`,
         
         // If it's a RESULT thread, restore the database reference and skip creation
         if (existingDiscordThread.name.includes('RESULT:')) {
-          console.log(`💾 Restoring database reference for existing RESULT thread: ${match.match_id} -> ${existingDiscordThread.id}`);
+          console.log(`📊 [SAFE RESTORATION] Restoring database reference for existing Discord thread`);
+          console.log(`   - Match: ${match.match_id}`);
+          console.log(`   - Thread: ${existingDiscordThread.id} ("${existingDiscordThread.name}")`);
+          console.log(`   - Reason: Thread exists in Discord but missing from database`);
+          console.log(`   - Action: Adding database reference, no Discord thread creation needed`);
+          
           await this.db.addMatchThread(match.match_id, existingDiscordThread.id, 'finished');
-          console.log(`✅ Restored finished match thread reference, skipping duplicate creation`);
+          console.log(`✅ [SAFE RESTORATION] Successfully restored thread reference`);
           return existingDiscordThread;
         } else {
-          console.log(`⚠️ Found non-RESULT thread for match ${match.match_id}, skipping finished thread creation to prevent confusion`);
+          console.log(`📊 [UNNECESSARY CORRECTION AVOIDED] Found non-RESULT thread for match ${match.match_id}`);
+          console.log(`   - Thread name: "${existingDiscordThread.name}"`);
+          console.log(`   - Reason: Thread exists but is not a finished match thread`);
+          console.log(`   - Action: Skipping creation to prevent confusion/duplicates`);
           return;
         }
       }
@@ -549,8 +625,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       // Invalidate cache since we just added a new thread
       this.invalidateMatchCache(match.match_id);
       
-      // Trigger cache invalidation for match finish event
-      await timeSensitiveCache.invalidateCacheForEvent('match_finish', match.match_id);
+    // Cache invalidation for match finish is handled by the unified cache
       
       // Verify the thread was actually saved with enhanced verification
       const savedThread = await this.db.hasFinishedMatchThread(match.match_id);
@@ -760,10 +835,10 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
    * Async wrapper for thread updates
    */
   updateThreadRsvpStatusAsync(matchId) {
-    // Use setTimeout to avoid blocking the main RSVP response
-    setTimeout(async () => {
-      await this.updateThreadRsvpStatus(matchId);
-    }, 1000);
+    // Update thread status immediately without artificial delay
+    this.updateThreadRsvpStatus(matchId).catch(error => {
+      console.error(`Error updating thread RSVP status for ${matchId}:`, error.message);
+    });
   }
 
 
@@ -772,7 +847,7 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
    */
   async reconcileExistingThreads() {
     try {
-      console.log('🔄 Reconciling existing threads...');
+console.log(`🔄 Starting reconciliation of existing threads with conservative approach...`);
       
       const channel = this.client.channels.cache.get(config.discord.channelId);
       if (!channel || !channel.threads) {
@@ -836,16 +911,19 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
             // Check if this thread is already tracked in database (any type)
             const hasAnyThreadInDB = await this.db.hasAnyMatchThread(matchId);
             
-            if (!hasAnyThreadInDB) {
-              console.log(`Restoring thread reference for match ID: ${matchId}`);
-              
-              // Determine thread type based on name
-              const threadType = thread.name.startsWith('RESULT:') ? 'finished' : 'upcoming';
-              await this.db.addMatchThread(matchId, thread.id, threadType);
-              reconciledCount++;
-            } else {
-              console.log(`Thread already tracked for match ID: ${matchId}`);
-            }
+      if (!hasAnyThreadInDB) {
+        console.log(`📊 [SAFE RESTORATION] Restoring missing thread reference: ${matchId} -> ${thread.id}`);
+        console.log(`   - Thread name: "${thread.name}"`);
+        console.log(`   - Reason: Thread exists in Discord but missing from database`);
+        console.log(`   - Action: Adding database reference without modifying Discord thread`);
+        
+        // Determine thread type based on name
+        const threadType = thread.name.startsWith('RESULT:') ? 'finished' : 'upcoming';
+        await this.db.addMatchThread(matchId, thread.id, threadType);
+        reconciledCount++;
+      } else {
+        console.log(`ℹ️ [NO ACTION NEEDED] Thread already tracked for match ID: ${matchId}`);
+      }
           } else {
             console.warn(`⚠️ Could not extract match ID from thread: ${thread.name}`);
           }
@@ -859,7 +937,11 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       
       for (const dbThread of dbThreads) {
         if (!foundMatchIds.has(dbThread.match_id)) {
-          console.log(`🗑️ Removing stale database reference for match ${dbThread.match_id} (thread ${dbThread.thread_id})`);
+          console.log(`📊 [SAFE CORRECTION] Removing stale database reference: ${dbThread.match_id} -> ${dbThread.thread_id}`);
+          console.log(`   - Reason: Database references thread that no longer exists in Discord`);
+          console.log(`   - Action: Cleaning up orphaned database entry`);
+          console.log(`   - Impact: Database consistency improved, no Discord changes`);
+          
           await this.db.removeMatchThread(dbThread.match_id);
           // Invalidate cache since we removed a thread reference
           this.invalidateMatchCache(dbThread.match_id);
@@ -1030,7 +1112,9 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       }
 
       // Before checking finished matches, detect potential thread conversions
+      console.log('🚨 DEBUG: About to call checkForPotentialThreadConversions at', new Date().toISOString());
       await this.checkForPotentialThreadConversions();
+      console.log('🚨 DEBUG: checkForPotentialThreadConversions completed at', new Date().toISOString());
       
       // Check for finished matches and create result threads
       console.log('🏁 Checking for finished matches...');
@@ -1183,22 +1267,49 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
 
   /**
    * Validate if a thread still exists and is accessible
+   * Enhanced version for startup reconciliation with detailed logging
    */
-  async validateThread(threadId) {
+  async validateThread(matchId, threadId) {
     try {
+      console.log(`🔍 [VALIDATION] Validating thread ${threadId} for match ${matchId}`);
+      
       const thread = await this.client.channels.fetch(threadId);
-      // Check if thread is archived or locked
-      if (thread && !thread.archived && !thread.locked) {
-        return true;
-      } else if (thread && (thread.archived || thread.locked)) {
-        console.log(`Thread ${threadId} is archived or locked`);
-        return false;
+      
+      if (!thread) {
+        console.log(`❌ [VALIDATION] Thread ${threadId} not found`);
+        return { isValid: false, reason: 'Thread not found', shouldRemove: true };
       }
-      return false;
+      
+      // Check thread accessibility and state
+      if (thread.archived) {
+        console.log(`⚠️ [VALIDATION] Thread ${threadId} is archived but accessible`);
+        return { isValid: false, reason: 'Thread is archived', shouldRemove: false };
+      }
+      
+      if (thread.locked) {
+        console.log(`🔒 [VALIDATION] Thread ${threadId} is locked but accessible`);
+        return { isValid: true, reason: 'Thread is locked but valid', shouldRemove: false };
+      }
+      
+      // Validate that the thread actually belongs to this match
+      const extractedMatchId = await this.extractMatchIdFromThread(thread);
+      if (extractedMatchId && extractedMatchId !== matchId) {
+        console.log(`❌ [VALIDATION] Thread ${threadId} belongs to different match: ${extractedMatchId} vs ${matchId}`);
+        return { isValid: false, reason: 'Thread belongs to different match', shouldRemove: true };
+      }
+      
+      // Check if it's actually a match thread
+      if (!this.isMatchThread(thread.name)) {
+        console.log(`❌ [VALIDATION] Thread ${threadId} is not a match thread: "${thread.name}"`);
+        return { isValid: false, reason: 'Not a match thread', shouldRemove: true };
+      }
+      
+      console.log(`✅ [VALIDATION] Thread ${threadId} is valid and accessible`);
+      return { isValid: true, reason: 'Thread is valid and accessible', shouldRemove: false };
+      
     } catch (err) {
-      // Thread doesn't exist or is inaccessible
-      console.log(`Thread ${threadId} validation failed: ${err.message}`);
-      return false;
+      console.log(`❌ [VALIDATION] Thread ${threadId} validation failed: ${err.message}`);
+      return { isValid: false, reason: `Validation error: ${err.message}`, shouldRemove: true };
     }
   }
 
@@ -1460,9 +1571,6 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
             });
             
             lockedCount++;
-            
-            // Small delay to avoid rate limiting
-            await new Promise(resolve => setTimeout(resolve, 1000));
           } else if (matchFinishTime) {
             const hoursRemaining = Math.ceil((matchFinishTime + (72 * 60 * 60 * 1000) - Date.now()) / (60 * 60 * 1000));
             console.log(`Match ${threadRecord.match_id} will be eligible for locking in ${hoursRemaining} hours`);
@@ -1557,9 +1665,6 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
               }
               
               createdThreads++;
-              
-              // Small delay to avoid rate limiting
-              await new Promise(resolve => setTimeout(resolve, 1000));
             }
           }
         } catch (matchErr) {
@@ -1731,30 +1836,73 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
 
   /**
    * Convert an existing INCOMING thread to a RESULT thread when match finishes
+   * Enhanced with detailed validation logging and conservative checks
    */
   async convertIncomingToResultThread(match) {
     try {
-      console.log(`🔄 Converting INCOMING thread to RESULT thread for match ${match.match_id}`);
+      console.log(`🔄 [CONVERSION START] Converting INCOMING thread to RESULT thread for match ${match.match_id}`);
+      console.log(`   - Match status: ${match.status}`);
+      console.log(`   - Match finished_at: ${match.finished_at ? new Date(match.finished_at * 1000).toISOString() : 'not set'}`);
       
+      // VALIDATION: Verify match data integrity
       if (!match || !match.teams || !match.teams.faction1 || !match.teams.faction2) {
-        console.error('Invalid finished match data for thread conversion');
-        return;
+        console.error(`❌ [CONVERSION FAILED] Invalid finished match data for thread conversion: ${match.match_id}`);
+        return null;
+      }
+      
+      // VALIDATION: Confirm match is actually finished
+      if (match.status !== 'FINISHED') {
+        console.error(`❌ [CONVERSION FAILED] Match ${match.match_id} status is ${match.status}, not FINISHED`);
+        return null;
+      }
+      
+      if (!match.finished_at) {
+        console.error(`❌ [CONVERSION FAILED] Match ${match.match_id} is FINISHED but missing finished_at timestamp`);
+        return null;
       }
 
       // Get the existing upcoming thread
       const existingThreadId = this.db.matchThreads.get(match.match_id);
       if (!existingThreadId) {
-        console.error(`No thread found in memory cache for match ${match.match_id}`);
-        return;
+        console.error(`❌ [CONVERSION FAILED] No thread found in memory cache for match ${match.match_id}`);
+        
+        // Try to find it in database as fallback
+        try {
+          const dbThreads = await this.db.db.getThreadsByType('upcoming');
+          const matchingDbThread = dbThreads.find(t => t.match_id === match.match_id);
+          if (matchingDbThread) {
+            console.log(`🔍 [RECOVERY] Found thread in database: ${matchingDbThread.thread_id}`);
+            // Update memory cache
+            this.db.matchThreads.set(match.match_id, matchingDbThread.thread_id);
+            const recoveredThread = await this.client.channels.fetch(matchingDbThread.thread_id).catch(() => null);
+            if (recoveredThread) {
+              console.log(`✅ [RECOVERY] Successfully recovered thread reference from database`);
+              return await this.convertIncomingToResultThread(match); // Retry with recovered thread
+            }
+          }
+        } catch (recoveryErr) {
+          console.error(`❌ [RECOVERY FAILED] Could not recover thread from database: ${recoveryErr.message}`);
+        }
+        return null;
       }
 
       const existingThread = await this.client.channels.fetch(existingThreadId).catch(() => null);
       if (!existingThread) {
-        console.error(`Could not fetch existing thread ${existingThreadId} for match ${match.match_id}`);
-        return;
+        console.error(`❌ [CONVERSION FAILED] Could not fetch existing thread ${existingThreadId} for match ${match.match_id}`);
+        // Clean up stale reference
+        this.db.matchThreads.delete(match.match_id);
+        await this.db.removeMatchThread(match.match_id);
+        console.log(`🧹 [CLEANUP] Removed stale thread reference for match ${match.match_id}`);
+        return null;
       }
 
-      console.log(`📍 Found existing thread: ${existingThread.name}`);
+      console.log(`📍 [VALIDATION] Found existing thread: "${existingThread.name}" (ID: ${existingThread.id})`);
+      
+      // VALIDATION: Ensure thread is an INCOMING thread
+      if (!existingThread.name.startsWith('INCOMING:')) {
+        console.warn(`⚠️ [VALIDATION WARNING] Thread "${existingThread.name}" does not appear to be an INCOMING thread`);
+        console.warn(`   This may indicate the thread was already converted or has an unexpected name format`);
+      }
       
       // Generate new thread name for RESULT
       const faction1 = match.teams.faction1.name;
@@ -1767,17 +1915,25 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       
       const newThreadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       
+      console.log(`🏷️ [CONVERSION] Renaming thread from "${existingThread.name}" to "${newThreadName}"`);
+      console.log(`   - Conversion reason: Match ${match.match_id} finished at ${new Date(match.finished_at * 1000).toISOString()}`);
+      
       // Update thread name
-      console.log(`🔄 Renaming thread from "${existingThread.name}" to "${newThreadName}"`);
       await existingThread.setName(newThreadName);
+      console.log(`✅ [THREAD UPDATE] Successfully renamed thread`);
       
       // Update thread type in database
+      console.log(`💾 [DATABASE] Updating thread type from 'upcoming' to 'finished' in database`);
       await this.db.db.run('UPDATE match_threads SET thread_type = ? WHERE match_id = ?', ['finished', match.match_id]);
       
       // Save finished match data to database
+      console.log(`💾 [DATABASE] Saving finished match data to database`);
       try {
         const winner = this.determineMatchWinner(match);
         const result = this.formatMatchResult(match);
+        
+        console.log(`   - Winner: ${winner}`);
+        console.log(`   - Result: ${result}`);
         
         await this.db.db.addOrUpdateMatch({
           match_id: match.match_id,
@@ -1794,12 +1950,14 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
           match.finished_at
         );
         
-        console.log(`✅ Saved finished match data to database: ${match.match_id}`);
+        console.log(`✅ [DATABASE] Successfully saved finished match data to database`);
       } catch (dbErr) {
-        console.error(`❌ Error saving finished match data to database: ${dbErr.message}`);
+        console.error(`❌ [DATABASE ERROR] Failed to save finished match data: ${dbErr.message}`);
+        // Continue with conversion even if database save fails
       }
       
       // Create and send match result embed to the thread
+      console.log(`📊 [RESULT EMBED] Creating and sending match result summary`);
       const matchDate = match.finished_at ? new Date(match.finished_at * 1000).toLocaleDateString('en-US', {
         year: 'numeric',
         month: 'long', 
@@ -1816,36 +1974,47 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       
       // Send the match summary (matching original RESULT thread style)
       await existingThread.send({ embeds: [summaryEmbed] });
+      console.log(`✅ [RESULT EMBED] Successfully sent match result summary to converted thread`);
       
       // Get team performance data if available (matching original RESULT thread style)
+      console.log(`📈 [PERFORMANCE] Checking for performance data`);
       const performanceData = await this.getMatchPerformanceData(match);
       if (performanceData) {
         const performanceEmbed = this.createPerformanceEmbed(match, performanceData);
         await existingThread.send({ embeds: [performanceEmbed] });
+        console.log(`✅ [PERFORMANCE] Sent performance data to converted thread`);
+      } else {
+        console.log(`ℹ️ [PERFORMANCE] No performance data available for this match`);
       }
       
       // Invalidate cache since we changed thread type
+      console.log(`🗑️ [CACHE] Invalidating cache for converted match`);
       this.invalidateMatchCache(match.match_id);
       
-      // Trigger cache invalidation for match finish event
-      await timeSensitiveCache.invalidateCacheForEvent('match_finish', match.match_id);
+      // Cache invalidation for match finish is handled by the unified cache
       
-      console.log(`✅ Successfully converted INCOMING thread to RESULT thread: ${newThreadName}`);
+      console.log(`✅ [CONVERSION COMPLETE] Successfully converted INCOMING thread to RESULT thread: "${newThreadName}"`);
+      console.log(`   - Thread ID: ${existingThread.id}`);
+      console.log(`   - Match: ${faction1} vs ${faction2}`);
+      console.log(`   - Finished: ${matchDate}`);
+      
       return existingThread;
       
     } catch (err) {
-      console.error(`Error converting INCOMING thread to RESULT thread: ${err.message}`);
+      console.error(`❌ [CONVERSION ERROR] Failed to convert INCOMING thread to RESULT thread for match ${match?.match_id}: ${err.message}`);
+      console.error(`   - Error stack: ${err.stack}`);
       return null;
     }
   }
 
   /**
-   * Check for potential thread conversions (INCOMING -> RESULT) based on existing threads and scheduling
-   * Enhanced to handle finished matches that need thread conversion after cache clearing
+   * Check for potential thread conversions (INCOMING → RESULT) based on existing threads and scheduling
+   * ENHANCED for conservative validation with fresh API data and extensive validation
    */
   async checkForPotentialThreadConversions() {
+    console.log('🚨 DEBUG: checkForPotentialThreadConversions method CALLED at', new Date().toISOString());
     try {
-      console.log('🔍 Checking for potential thread conversions...');
+      console.log('🔍 Checking for potential thread conversions with ENHANCED conservative validation...');
       
       // Get all upcoming threads from database
       const upcomingThreads = await this.db.db.getThreadsByType('upcoming');
@@ -1855,133 +2024,235 @@ const threadName = `RESULT: ${shortDate} - ${faction1} vs ${faction2}`;
       }
       
       const now = Date.now() / 1000; // Unix timestamp
-      let conversionsTriggered = 0;
       let directConversions = 0;
+      let validationChecks = 0;
+      
+      console.log(`📋 Found ${upcomingThreads.length} upcoming threads to check for conversion`);
       
       for (const threadRecord of upcomingThreads) {
         try {
-          console.log(`🔍 Checking thread ${threadRecord.thread_id} for match ${threadRecord.match_id}`);
+          console.log(`🔍 [ENHANCED] Checking thread ${threadRecord.thread_id} for match ${threadRecord.match_id}`);
           
-          // First, try to get match data from the upcoming matches cache
-          let match = this.db.upcomingMatches.get(threadRecord.match_id);
-          let isFinishedMatch = false;
+          // CONSERVATIVE APPROACH: Always fetch fresh match data from FACEIT API first
+          console.log(`🌐 [ENHANCED] Fetching fresh match data from FACEIT API for validation: ${threadRecord.match_id}`);
+          let freshApiMatch = null;
+          let freshApiError = null;
           
-          // If not found in upcoming cache, check the database for finished match data
-          if (!match) {
-            console.log(`Match ${threadRecord.match_id} not found in upcoming cache, checking database for finished match...`);
+          try {
+            const faceitService = require('./faceitService');
+            freshApiMatch = await faceitService.getMatchDetails(threadRecord.match_id);
+            console.log(`✅ [ENHANCED] Retrieved fresh API data for match ${threadRecord.match_id}, status: ${freshApiMatch?.status}, finished_at: ${freshApiMatch?.finished_at}`);
+          } catch (apiErr) {
+            freshApiError = apiErr.message;
+            console.log(`❌ [ENHANCED] Failed to fetch fresh API data for match ${threadRecord.match_id}: ${freshApiError}`);
+          }
+          
+          // Get cached/stored match data for comparison
+          let storedMatch = this.db.upcomingMatches.get(threadRecord.match_id);
+          if (!storedMatch) {
             try {
-              const dbMatch = await this.db.db.getMatch(threadRecord.match_id);
-              if (dbMatch && dbMatch.status === 'FINISHED') {
-                console.log(`✅ Found finished match in database: ${threadRecord.match_id}`);
-                match = dbMatch;
-                isFinishedMatch = true;
-              }
+              storedMatch = await this.db.db.getMatch(threadRecord.match_id);
+              console.log(`📋 [ENHANCED] Retrieved stored match data from database: ${threadRecord.match_id}`);
             } catch (dbErr) {
-              console.log(`Could not find match ${threadRecord.match_id} in database: ${dbErr.message}`);
+              console.log(`⚠️ [ENHANCED] No stored match data found for ${threadRecord.match_id}: ${dbErr.message}`);
             }
+          } else {
+            console.log(`📋 [ENHANCED] Retrieved stored match data from cache: ${threadRecord.match_id}`);
           }
           
-          // If still not found, try to fetch from FACEIT API as a last resort
-          if (!match) {
-            console.log(`Match ${threadRecord.match_id} not found in database, attempting to fetch from FACEIT API...`);
-            try {
-              const faceitService = require('./faceitService');
-              const apiMatch = await faceitService.getMatchDetails(threadRecord.match_id);
-              if (apiMatch && apiMatch.status === 'FINISHED') {
-                console.log(`✅ Found finished match via FACEIT API: ${threadRecord.match_id}`);
-                match = apiMatch;
-                isFinishedMatch = true;
-                
-                // Save the match to database for future reference
-                try {
-                  const winner = this.determineMatchWinner(apiMatch);
-                  const result = this.formatMatchResult(apiMatch);
-                  
-                  await this.db.db.addOrUpdateMatch({
-                    match_id: apiMatch.match_id,
-                    teams: apiMatch.teams,
-                    scheduled_at: apiMatch.scheduled_at,
-                    competition_name: apiMatch.competition_name || 'FACEIT Match',
-                    status: 'FINISHED'
-                  });
-                  
-                  await this.db.db.updateMatchResult(
-                    apiMatch.match_id,
-                    result,
-                    winner,
-                    apiMatch.finished_at
-                  );
-                  
-                  console.log(`💾 Saved API-fetched match data to database: ${apiMatch.match_id}`);
-                } catch (saveErr) {
-                  console.error(`Failed to save API-fetched match data: ${saveErr.message}`);
-                  // Continue with conversion even if save fails
-                }
+          // VALIDATION PHASE: Only proceed if we have reliable fresh API data
+          if (!freshApiMatch) {
+            console.log(`⚠️ [ENHANCED] CONSERVATIVE SKIP: No fresh API data available for ${threadRecord.match_id} - cannot safely validate conversion`);
+            
+            // If scheduled more than 4 hours ago and we can't get API data, log concern
+            if (storedMatch?.scheduled_at) {
+              const hoursSinceScheduled = (now - storedMatch.scheduled_at) / 3600;
+              if (hoursSinceScheduled >= 4) {
+                console.warn(`🚨 [ENHANCED] ATTENTION: Match ${threadRecord.match_id} scheduled ${hoursSinceScheduled.toFixed(1)}h ago but API unavailable for status validation`);
               }
-            } catch (apiErr) {
-              console.log(`Could not fetch match ${threadRecord.match_id} from FACEIT API: ${apiErr.message}`);
             }
-          }
-          
-          if (!match) {
-            console.log(`⚠️ No match data found for thread ${threadRecord.match_id}, skipping conversion check`);
             continue;
           }
           
-          // If we found a finished match in database, convert the thread immediately
-          if (isFinishedMatch) {
-            console.log(`🔄 Found FINISHED match with INCOMING thread, converting immediately: ${threadRecord.match_id}`);
-            const convertedThread = await this.convertIncomingToResultThread(match);
+          // VALIDATION: Compare fresh API data with stored data
+          let validationResult = this.validateMatchDataForConversion(freshApiMatch, storedMatch, threadRecord.match_id);
+          validationChecks++;
+          
+          if (!validationResult.isValid) {
+            console.log(`⚠️ CONSERVATIVE SKIP: Validation failed for ${threadRecord.match_id}: ${validationResult.reason}`);
+            continue;
+          }
+          
+          // CONVERSION DECISION: Only convert if fresh API data shows FINISHED status
+          if (freshApiMatch.status === 'FINISHED') {
+            console.log(`✅ VALIDATED CONVERSION: Fresh API confirms match ${threadRecord.match_id} is FINISHED`);
+            console.log(`   Conversion reason: ${validationResult.conversionReason}`);
+            
+            // Additional validation: ensure match has finished_at timestamp
+            if (!freshApiMatch.finished_at) {
+              console.warn(`⚠️ CONSERVATIVE SKIP: Match ${threadRecord.match_id} status is FINISHED but missing finished_at timestamp`);
+              continue;
+            }
+            
+            // Perform the conversion with fresh API data
+            const convertedThread = await this.convertIncomingToResultThread(freshApiMatch);
             if (convertedThread) {
               directConversions++;
-              console.log(`✅ Successfully converted thread for finished match: ${threadRecord.match_id}`);
+              console.log(`✅ Successfully converted thread for validated finished match: ${threadRecord.match_id}`);
+              
+              // Save fresh match data to database to keep it up-to-date
+              try {
+                const winner = this.determineMatchWinner(freshApiMatch);
+                const result = this.formatMatchResult(freshApiMatch);
+                
+                await this.db.db.addOrUpdateMatch({
+                  match_id: freshApiMatch.match_id,
+                  teams: freshApiMatch.teams,
+                  scheduled_at: freshApiMatch.scheduled_at,
+                  competition_name: freshApiMatch.competition_name || 'FACEIT Match',
+                  status: 'FINISHED'
+                });
+                
+                await this.db.db.updateMatchResult(
+                  freshApiMatch.match_id,
+                  result,
+                  winner,
+                  freshApiMatch.finished_at
+                );
+                
+                console.log(`💾 Updated database with fresh API match data: ${freshApiMatch.match_id}`);
+              } catch (saveErr) {
+                console.error(`Failed to save fresh API match data: ${saveErr.message}`);
+              }
             } else {
-              console.error(`❌ Failed to convert thread for finished match: ${threadRecord.match_id}`);
+              console.error(`❌ Failed to convert thread for validated finished match: ${threadRecord.match_id}`);
             }
-            continue;
-          }
-          
-          // For upcoming matches, check if they might be finished based on time
-          if (!match.scheduled_at) {
-            console.log(`Match ${threadRecord.match_id} has no scheduled_at time, skipping time-based check`);
-            continue;
-          }
-          
-          const matchTime = match.scheduled_at;
-          const timeSinceScheduled = now - matchTime;
-          const hoursSinceScheduled = timeSinceScheduled / 3600;
-          
-          // If a match was scheduled more than 2.5 hours ago, check if it might be finished
-          if (hoursSinceScheduled >= 2.5) {
-            console.log(`⚠️ Found potentially finished match with INCOMING thread: ${threadRecord.match_id}`);
-            console.log(`   Scheduled: ${new Date(matchTime * 1000).toISOString()}`);
-            console.log(`   Hours since scheduled: ${hoursSinceScheduled.toFixed(1)}`);
+          } else {
+            // Match is not finished - log current status for monitoring
+            const scheduledTime = freshApiMatch.scheduled_at ? new Date(freshApiMatch.scheduled_at * 1000).toISOString() : 'Unknown';
+            const hoursSinceScheduled = freshApiMatch.scheduled_at ? (now - freshApiMatch.scheduled_at) / 3600 : 0;
             
-            // Trigger cache invalidation to force fresh API check
-            console.log(`🔄 Triggering cache invalidation to check if match ${threadRecord.match_id} is finished...`);
-            await timeSensitiveCache.invalidateCacheForEvent('match_transition_check', threadRecord.match_id);
-            conversionsTriggered++;
+            console.log(`📊 Match ${threadRecord.match_id} status: ${freshApiMatch.status}`);
+            console.log(`   Scheduled: ${scheduledTime} (${hoursSinceScheduled.toFixed(1)}h ago)`);
+            console.log(`   Validation: ${validationResult.reason}`);
+            
+            // Alert if match has been scheduled for a very long time but still not finished
+            if (hoursSinceScheduled >= 6) {
+              console.warn(`🚨 LONG-RUNNING MATCH: ${threadRecord.match_id} scheduled ${hoursSinceScheduled.toFixed(1)}h ago but still ${freshApiMatch.status}`);
+            }
           }
+          
         } catch (threadErr) {
           console.error(`Error checking thread ${threadRecord.thread_id} for conversion: ${threadErr.message}`);
         }
       }
       
+      // Summary logging
+      console.log(`🔍 Thread conversion check complete:`);
+      console.log(`   - Validation checks performed: ${validationChecks}`);
+      console.log(`   - Direct conversions completed: ${directConversions}`);
+      
       if (directConversions > 0) {
-        console.log(`✅ Performed ${directConversions} direct thread conversions for finished matches`);
-      }
-      
-      if (conversionsTriggered > 0) {
-        console.log(`🔄 Triggered ${conversionsTriggered} potential thread conversion checks`);
-      }
-      
-      if (directConversions === 0 && conversionsTriggered === 0) {
-        console.log('No thread conversions needed at this time');
+        console.log(`✅ Successfully performed ${directConversions} validated thread conversions`);
+      } else if (validationChecks > 0) {
+        console.log(`📊 Performed ${validationChecks} validation checks, no conversions needed`);
+      } else {
+        console.log('📋 No thread conversions or validations performed');
       }
       
     } catch (err) {
       console.error('Error checking for potential thread conversions:', err.message);
     }
+  }
+  
+  /**
+   * Validate match data for thread conversion with extensive checks
+   */
+  validateMatchDataForConversion(freshApiMatch, storedMatch, matchId) {
+    console.log(`🔍 Validating match data for conversion: ${matchId}`);
+    
+    // Basic API data validation
+    if (!freshApiMatch) {
+      return {
+        isValid: false,
+        reason: 'No fresh API data available',
+        conversionReason: null
+      };
+    }
+    
+    if (!freshApiMatch.teams || !freshApiMatch.teams.faction1 || !freshApiMatch.teams.faction2) {
+      return {
+        isValid: false,
+        reason: 'Fresh API data missing team information',
+        conversionReason: null
+      };
+    }
+    
+    // For FINISHED matches, ensure we have all required data
+    if (freshApiMatch.status === 'FINISHED') {
+      if (!freshApiMatch.finished_at) {
+        return {
+          isValid: false,
+          reason: 'FINISHED match missing finished_at timestamp',
+          conversionReason: null
+        };
+      }
+      
+      // Validate finished_at is reasonable (not in future, not too old)
+      const now = Date.now() / 1000;
+      const finishedAt = freshApiMatch.finished_at;
+      
+      if (finishedAt > now) {
+        return {
+          isValid: false,
+          reason: 'FINISHED match has future finished_at timestamp',
+          conversionReason: null
+        };
+      }
+      
+      // Don't convert matches finished more than 7 days ago (likely stale)
+      const daysSinceFinished = (now - finishedAt) / (24 * 3600);
+      if (daysSinceFinished > 7) {
+        return {
+          isValid: false,
+          reason: `Match finished ${daysSinceFinished.toFixed(1)} days ago - too old for conversion`,
+          conversionReason: null
+        };
+      }
+      
+      // Additional validation: compare with stored data if available
+      let comparisonResult = '';
+      if (storedMatch) {
+        // Check if status changed from non-FINISHED to FINISHED
+        if (storedMatch.status && storedMatch.status !== 'FINISHED') {
+          comparisonResult = `Status changed from ${storedMatch.status} to FINISHED`;
+        } else if (storedMatch.status === 'FINISHED') {
+          // Both stored and fresh show FINISHED - check timestamps
+          if (storedMatch.finished_at && Math.abs(storedMatch.finished_at - freshApiMatch.finished_at) > 300) {
+            comparisonResult = `finished_at timestamp updated (${Math.abs(storedMatch.finished_at - freshApiMatch.finished_at)}s difference)`;
+          } else {
+            comparisonResult = 'Confirmed FINISHED status with consistent data';
+          }
+        } else {
+          comparisonResult = 'Fresh API data shows newly FINISHED match';
+        }
+      } else {
+        comparisonResult = 'Fresh API data shows FINISHED match (no stored data for comparison)';
+      }
+      
+      return {
+        isValid: true,
+        reason: 'Valid FINISHED match with fresh API data',
+        conversionReason: `Fresh API validation: ${comparisonResult}`
+      };
+    }
+    
+    // For non-FINISHED matches, still validate but don't convert
+    return {
+      isValid: true,
+      reason: `Match status ${freshApiMatch.status} - no conversion needed`,
+      conversionReason: null
+    };
   }
   
   /**

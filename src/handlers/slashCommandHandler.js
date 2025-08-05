@@ -924,9 +924,13 @@ class SlashCommandHandler {
       await this.db.reloadMatchThreads();
       console.log('🔄 Cleared volatile in-memory caches and reloaded threads from database');
 
-      // Step 2: Force refresh all match-related data caches via time-sensitive cache service
-      const timeSensitiveCache = require('../services/timeSensitiveCacheService');
-      await timeSensitiveCache.forceRefreshMatchData();
+      // Step 2: Force refresh all match-related data caches via unified cache service
+      const cache = require('../services/cache');
+      await cache.invalidatePattern('matches:');
+      await cache.invalidatePattern('match:');
+      await cache.invalidatePattern('team:');
+      await cache.invalidatePattern('player:');
+      await cache.invalidatePattern('search:');
       console.log('🔄 Forced refresh of all match data caches (matches, team data, players)');
 
       // Step 3: Clean up expired database cache entries (non-destructive)

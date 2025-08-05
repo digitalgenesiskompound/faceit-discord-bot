@@ -149,6 +149,11 @@ class Database {
 
   // Enhanced run method with retry logic for INSERT, UPDATE, DELETE
   async run(sql, params = []) {
+    // Allow table creation during initialization
+    if (!this.db && !sql.includes('CREATE TABLE')) {
+      throw new Error('Database not initialized');
+    }
+    
     const operationName = this.extractOperationName(sql);
     
     return await errorHandler.databaseOperationWithRetry(
@@ -262,6 +267,10 @@ class Database {
 
   // Enhanced get method with retry logic for SELECT (single row)
   async get(sql, params = []) {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    
     const operationName = this.extractOperationName(sql) + '_get';
     
     return await errorHandler.databaseOperationWithRetry(
@@ -298,6 +307,10 @@ class Database {
 
   // Enhanced all method with retry logic for SELECT (multiple rows)
   async all(sql, params = []) {
+    if (!this.db) {
+      throw new Error('Database not initialized');
+    }
+    
     const operationName = this.extractOperationName(sql) + '_all';
     
     return await errorHandler.databaseOperationWithRetry(

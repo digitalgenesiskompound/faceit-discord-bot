@@ -1,6 +1,5 @@
 const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
 const config = require('../config/config');
-const rateLimiter = require('../utils/rateLimiter');
 
 class ButtonHandler {
   constructor(client, databaseService, discordService, slashCommandHandler = null) {
@@ -40,8 +39,8 @@ class ButtonHandler {
       
       // Handle status button
       if (response === 'status') {
-        // Refresh RSVP status for just this specific match (much faster)
-        await this.discordService.updateThreadRsvpStatusAsync(matchId);
+        // Refresh RSVP status for just this specific match (immediate update)
+        await this.discordService.updateThreadRsvpStatus(matchId, interaction.channel);
         // Then handle status button
         await this.handleStatusButton(interaction, matchId);
         return;
@@ -95,16 +94,14 @@ class ButtonHandler {
         threadLink = `\n🔗 [View Match Thread](https://discord.com/channels/${interaction.guild.id}/${threadId})`;
       }
       
-      // Use rate limiter for interaction replies
-      await rateLimiter.enqueue('interaction', async () => {
-        return await interaction.reply({ 
-          content: `${responseEmoji} Your RSVP has been ${actionText}! **${userMapping.faceit_nickname}** - ${response.toUpperCase()}${threadLink}`, 
-          flags: MessageFlags.Ephemeral
-        });
-      }, 1); // Higher priority for user responses
+      // Reply to interaction
+      await interaction.reply({ 
+        content: `${responseEmoji} Your RSVP has been ${actionText}! **${userMapping.faceit_nickname}** - ${response.toUpperCase()}${threadLink}`, 
+        flags: MessageFlags.Ephemeral
+      });
       
-      // Update thread RSVP status
-      await this.discordService.updateThreadRsvpStatusAsync(matchId);
+      // Update thread RSVP status immediately (synchronous for better UX)
+      await this.discordService.updateThreadRsvpStatus(matchId, interaction.channel);
       
       console.log(`RSVP ${actionText} via button: ${interaction.user.tag} (${userMapping.faceit_nickname}) -> ${response} for match ${matchId}`);
       
@@ -129,8 +126,8 @@ class ButtonHandler {
       // Get all team players from FACEIT using cached data (same as createDynamicRsvpStatus)
       let teamPlayers = [];
       try {
-        const timeSensitiveCache = require('../services/timeSensitiveCacheService');
-        teamPlayers = await timeSensitiveCache.getTeamPlayersTimeAware(async () => {
+        const cache = require('../services/cache');
+        teamPlayers = await cache.getTeamData('team_players', async () => {
           const faceitService = require('../services/faceitService');
           const teamData = await faceitService.makeProtectedApiRequest(
             `https://open.faceit.com/data/v4/teams/${require('../config/config').faceit.teamId}`,
@@ -278,14 +275,12 @@ class ButtonHandler {
             .setStyle(ButtonStyle.Secondary)
         );
       
-      // Use rate limiter for status responses
-      await rateLimiter.enqueue('interaction', async () => {
-        return await interaction.reply({ 
-          embeds: [embed], 
-          components: [refreshRow],
-          flags: MessageFlags.Ephemeral
-        });
-      }, 0); // Normal priority
+      // Reply with status embed
+      await interaction.reply({ 
+        embeds: [embed], 
+        components: [refreshRow],
+        flags: MessageFlags.Ephemeral
+      });
       
     } catch (err) {
       console.error(`Error handling status button: ${err.message}`);
