@@ -47,21 +47,8 @@ class ThreadService {
         reason: `Thread for match: ${faction1} vs ${faction2}`
       });
 
-// Add Analyze button for INCOMING threads
-      if (type === 'upcoming') {
-        const analyzeButtonRow = new ActionRowBuilder()
-          .addComponents(
-            new ButtonBuilder()
-              .setCustomId(`analyze_enemy_${match.match_id}`)
-              .setLabel('Analyze')
-              .setStyle(ButtonStyle.Primary)
-          );
-          
-        await thread.send({
-          content: 'Analyze the enemy team!',
-          components: [analyzeButtonRow]
-        });
-      }
+// Analyze button is now included in the main notification message,
+      // so we don't need to add it separately to the thread
 
       // Store thread reference in database
       await this.db.addMatchThread(match.match_id, thread.id, type);

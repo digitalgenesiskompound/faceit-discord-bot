@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
 /**
- * Script to add Analyze buttons to existing INCOMING threads
- * This is a one-time update script for existing match threads
+ * Script to clean up redundant Analyze buttons from existing INCOMING threads
+ * Analyze buttons are now included in the main notification message
  */
 
 const { Client, GatewayIntentBits, ActionRowBuilder, ButtonBuilder, ButtonStyle } = require('discord.js');
-const DatabaseService = require('./src/services/databaseService');
-const config = require('./src/config/config');
+const DatabaseService = require('../services/databaseService');
+const config = require('../config/config');
 
 class ThreadUpdater {
   constructor() {
@@ -28,15 +28,15 @@ class ThreadUpdater {
     console.log('✅ Bot logged in successfully');
   }
 
-  async updateExistingThreads() {
+  async cleanupRedundantButtons() {
     try {
-      console.log('🔍 Finding existing INCOMING threads...');
+      console.log('🔍 Finding existing INCOMING threads with redundant Analyze buttons...');
       
       // Get all upcoming threads from database
       const upcomingThreads = await this.db.db.getThreadsByType('upcoming');
       console.log(`Found ${upcomingThreads.length} INCOMING threads in database`);
 
-      let updatedCount = 0;
+      let cleanedCount = 0;
       let errorCount = 0;
 
       for (const threadRecord of upcomingThreads) {
@@ -53,9 +53,9 @@ class ThreadUpdater {
 
           console.log(`📋 Thread found: "${thread.name}"`);
 
-          // Check if thread already has an Analyze button
-          const messages = await thread.messages.fetch({ limit: 10 });
-          let hasAnalyzeButton = false;
+          // Find messages with Analyze buttons to remove
+          const messages = await thread.messages.fetch({ limit: 50 });
+          let messagesWithAnalyzeButtons = [];
 
           for (const message of messages.values()) {
             if (message.author.id === this.client.user.id && message.components.length > 0) {
@@ -63,56 +63,53 @@ class ThreadUpdater {
                 if (component.components) {
                   for (const button of component.components) {
                     if (button.customId && button.customId.startsWith('analyze_enemy_')) {
-                      hasAnalyzeButton = true;
-                      break;
+                      // Check if this message ONLY contains analyze button (redundant)
+                      if (message.content.includes('Enemy Team Analysis Available') || 
+                          message.content.includes('Analyze the enemy team!')) {
+                        messagesWithAnalyzeButtons.push(message);
+                        break;
+                      }
                     }
                   }
                 }
               }
             }
-            if (hasAnalyzeButton) break;
           }
 
-          if (hasAnalyzeButton) {
-            console.log(`✅ Thread already has Analyze button, skipping`);
+          if (messagesWithAnalyzeButtons.length === 0) {
+            console.log(`✅ No redundant Analyze buttons found in thread`);
             continue;
           }
 
-          // Add Analyze button
-          const analyzeButtonRow = new ActionRowBuilder()
-            .addComponents(
-              new ButtonBuilder()
-                .setCustomId(`analyze_enemy_${threadRecord.match_id}`)
-                .setLabel('🔍 Analyze Enemy Team')
-                .setStyle(ButtonStyle.Primary)
-            );
-
-          await thread.send({
-            content: '🎯 **Enemy Team Analysis Available**\nClick the button below to get detailed stats and tactical insights about your opponents:',
-            components: [analyzeButtonRow]
-          });
-
-          console.log(`✅ Added Analyze button to thread: ${thread.name}`);
-          updatedCount++;
+          // Delete redundant analyze button messages
+          for (const messageToDelete of messagesWithAnalyzeButtons) {
+            try {
+              await messageToDelete.delete();
+              console.log(`🗑️ Removed redundant Analyze button message`);
+              cleanedCount++;
+            } catch (deleteError) {
+              console.error(`Error deleting message: ${deleteError.message}`);
+            }
+          }
 
           // Small delay to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 1000));
 
         } catch (threadError) {
-          console.error(`❌ Error updating thread ${threadRecord.thread_id}:`, threadError.message);
+          console.error(`❌ Error processing thread ${threadRecord.thread_id}:`, threadError.message);
           errorCount++;
         }
       }
 
-      console.log(`\n📊 Update Summary:`);
+      console.log(`\n📊 Cleanup Summary:`);
       console.log(`   - Threads processed: ${upcomingThreads.length}`);
-      console.log(`   - Successfully updated: ${updatedCount}`);
+      console.log(`   - Redundant messages removed: ${cleanedCount}`);
       console.log(`   - Errors: ${errorCount}`);
 
-      return { total: upcomingThreads.length, updated: updatedCount, errors: errorCount };
+      return { total: upcomingThreads.length, cleaned: cleanedCount, errors: errorCount };
 
     } catch (error) {
-      console.error('❌ Error during thread update process:', error);
+      console.error('❌ Error during thread cleanup process:', error);
       throw error;
     }
   }
@@ -132,10 +129,10 @@ async function main() {
     console.log('🚀 Starting thread update process...');
     await updater.initialize();
     
-    const results = await updater.updateExistingThreads();
+    const results = await updater.cleanupRedundantButtons();
     
-    console.log('\n✅ Thread update process completed successfully!');
-    console.log(`Updated ${results.updated} threads with Analyze buttons`);
+    console.log('\n✅ Thread cleanup process completed successfully!');
+    console.log(`Cleaned up ${results.cleaned} redundant Analyze button messages`);
     
   } catch (error) {
     console.error('❌ Thread update process failed:', error);
