@@ -1,74 +1,73 @@
 ## This was *vibe* coded.
 
+
 <img width="720" height="720" alt="faceit-discord" src="https://github.com/user-attachments/assets/28f118bf-b64a-4f18-9656-88caba522a5b" />
 <img width="720" height="560" alt="Untitled design" src="https://github.com/user-attachments/assets/50082855-6198-49ec-8abc-96b8895d6fd4" />
 
 # FACEIT Discord Bot
 
-A Discord bot that automatically monitors your FACEIT team's CS2 matches and provides interactive RSVP functionality. Players can link their Discord accounts to FACEIT profiles and get notifications about upcoming matches with one-click attendance confirmation.
+A Discord bot that monitors your FACEIT team's CS2 matches and posts interactive RSVP threads in Discord. Players can link their Discord accounts to FACEIT and respond with one click.
+## Features
 
-## Key Features
-
-- **🎯 Automatic Match Detection** - Monitors your team's matches every 30 minutes
-- **💬 Match Threads** - Creates dedicated Discord threads for each match with RSVP buttons and enemy analysis
-- **🔗 Account Linking** - One-click registration system to link Discord ↔ FACEIT accounts
-- **📊 Match Tracking** - View upcoming/finished matches and player statistics
-- **👥 Team Management** - View all registered players with `/team` command
-- **🔍 Enemy Analysis** - Strategic enemy team analysis directly in match threads
-- **🔧 Admin Tools** - Backup system, cache management, and user administration
-- **🐳 Docker Ready** - Easy deployment with automatic restarts and health monitoring
+- Automatic match detection (every 30 minutes)
+- Per-match Discord threads with RSVP buttons
+- One-click account linking (Discord ↔ FACEIT)
+- Team roster view and player profiles
+- Optional enemy analysis in match threads
+- Admin tools (backups, cache management)
+- Docker-ready deployment
 
 ## Commands
 
-**For Everyone:**
-- `/help` - Show all available commands
-- `/matches` - View upcoming matches
-- `/team` - List all registered team players with Discord accounts
-- `/register` - Link your Discord to FACEIT (one-click)
-- `/profile` - View your linked FACEIT profile
-- `/lookup <player>` - Search FACEIT players
-- `/finishedmatches` - View recent match results
+Everyone:
+- /help — list commands
+- /register — one-click link Discord ↔ FACEIT
+- /matches — upcoming matches
+- /finishedmatches — recent results
+- /team — team roster
+- /profile — your linked FACEIT profile
+- /lookup <player> — search FACEIT
 
-**Admin Only:**
-- `/backup-create` - Manual database backup
-- `/clear-cache` - Clear bot caches
-- `/clean-rsvp-status` - Reset RSVP data
+Admins:
+- /edit-rsvp — interactive, staged editor for any user’s RSVP (with search/pagination)
+- /backup-create — manual DB backup
+- /clear-cache — clear caches
+- /clean-rsvp-status — reset RSVP data
 
 ## Quick Setup
 
-### 1. Get Required IDs and Tokens
+1) Create a Discord bot
+- Create an app at https://discord.com/developers/applications
+- Add a Bot user, copy Bot Token and Client ID
+- Invite it to your server (Bot + applications.commands scope)
 
-**FACEIT API:**
-- Get API key from [FACEIT Developer Portal](https://developers.faceit.com/)
-- Find your team ID from your FACEIT team page URL: `xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`
+2) Get FACEIT details
+- Create an API key at https://developers.faceit.com/
+- Find your Team ID (UUID from your FACEIT team URL)
 
-**Discord Bot:**
-- Create bot at [Discord Developer Portal](https://discord.com/developers/applications)
-- Copy bot token and bot client ID
-- Invite bot to server with "All Chat" permissions
-- Copy channel ID where you want notifications (enable Developer Mode in Discord)
-- Copy your Discord user ID (for admin commands)
-
-### 2. Configure Environment
-
-Create a `.env` file:
+3) Configure environment (.env)
 
 ```env
 # FACEIT
-FACEIT_API_KEY=your_faceit_api_key_here
-TEAM_ID=your_faceit_team_id_here
+FACEIT_API_KEY=your_faceit_api_key
+TEAM_ID=your_faceit_team_id
 
 # Discord
-DISCORD_BOT_TOKEN=your_discord_bot_token_here
-DISCORD_CLIENT_ID=your_discord_client_id_here
-DISCORD_CHANNEL_ID=your_discord_channel_id_here
-ADMIN_DISCORD_ID=your_discord_user_id_here
+DISCORD_BOT_TOKEN=your_discord_bot_token
+DISCORD_CLIENT_ID=your_discord_client_id
+DISCORD_CHANNEL_ID=the_channel_for_notifications
+ADMIN_DISCORD_ID=your_discord_user_id
+# Optional: restrict command registration to one server (faster updates)
+DISCORD_GUILD_ID=your_guild_id
+# Optional: grant mod rights without a role
+MODERATOR_DISCORD_IDS=111111111111111111,222222222222222222
 
-# Optional (for faster command deployment)
-DISCORD_GUILD_ID=your_discord_server_id_here
+# Startup tuning (optional)
+STARTUP_RECOVERY=true
+STARTUP_VALIDATION_DELAY_MS=30000
 ```
 
-### 3. Deploy
+4) Run with Docker
 
 ```bash
 git clone https://github.com/digitalgenesiskompound/faceit-discord-bot.git
@@ -76,22 +75,21 @@ cd faceit-discord-bot
 docker compose up -d
 ```
 
-### 4. Verify
-
-- Bot should be online in Discord
-- Test with `/help` command
-- Check health: `http://localhost:8080/health`
+5) Verify
+- Bot online in Discord
+- Try /help
+- Health: http://localhost:8080/health
 
 ## Management
 
 ```bash
-# View logs
+# Logs
 docker compose logs -f bot
 
-# Restart bot
+# Restart
 docker compose restart bot
 
-# Update and rebuild
+# Update + rebuild
 git pull && docker compose up -d --build
 
 # Manual backup
@@ -136,13 +134,10 @@ cp ./data/bot.db ./data/bot.db.backup
 - **Data Storage**: SQLite database persists user links and RSVP data
 - **Backup System**: Automatic backups every 6 hours + manual backup commands
 
-## Documentation
-
-For detailed information about specific features:
-- **[Feature Documentation](FEATURES_DOCUMENTATION.md)** - Complete guide to `/team` command and "Analyze" button functionality
-- **[Bot Commands](README.md#commands)** - All available slash commands
-- **[Troubleshooting](README.md#troubleshooting)** - Common issues and solutions
+## Notes
+- Global slash commands can take up to 1 hour to propagate. Use DISCORD_GUILD_ID for faster, per-server updates.
+- The bot stores data in ./data/bot.db (SQLite). Back up this file to preserve state.
+- If startup feels slow, set STARTUP_RECOVERY=false and/or increase STARTUP_VALIDATION_DELAY_MS.
 
 ---
-
-**Built for competitive CS2 teams** • **Docker containerized** • **MIT License**
+Built for competitive CS2 teams • Docker containerized • MIT License
