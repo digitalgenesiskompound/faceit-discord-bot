@@ -1074,6 +1074,21 @@ console.log(`🔄 Starting reconciliation of existing threads with conservative 
           try {
             allMatchesRequiringThreads.push({ match, type: 'finished' });
 
+            // Prefer converting an existing INCOMING thread to RESULT before creating a new one
+            const hasUpcoming = await this.db.hasUpcomingMatchThread(match.match_id);
+            if (hasUpcoming) {
+              console.log(`🔄 Existing INCOMING thread detected for finished match ${match.match_id} - attempting conversion`);
+              const converted = await this.convertIncomingToResultThread(match);
+              if (converted) {
+                createdThreads++;
+                // Small delay to avoid rate limiting
+                await new Promise(resolve => setTimeout(resolve, 300));
+                continue; // Move to next finished match
+              } else {
+                console.warn(`⚠️ Conversion attempt failed for ${match.match_id}, will fallback to creating RESULT thread if needed`);
+              }
+            }
+
           // Check if we already have a finished match thread for this match (ALWAYS use fresh DB query)
             const hasThread = await this.db.hasFinishedMatchThread(match.match_id);
 
