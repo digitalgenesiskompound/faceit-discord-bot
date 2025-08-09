@@ -15,8 +15,13 @@ const config = {
     channelId: process.env.DISCORD_CHANNEL_ID
   },
   
-  // Admin Configuration
+  // Admin / Moderator Configuration
   adminDiscordId: process.env.ADMIN_DISCORD_ID,
+  moderatorRoleName: process.env.MODERATOR_ROLE_NAME || 'Moderator',
+  moderatorDiscordIds: (process.env.MODERATOR_DISCORD_IDS || '')
+    .split(',')
+    .map(id => id.trim())
+    .filter(id => id.length > 0),
   
   // File paths
   paths: {
@@ -27,6 +32,14 @@ const config = {
   // Server Configuration
   server: {
     port: 8080
+  },
+
+  // Performance tuning
+  tuning: {
+    // If false, skip running recovery on startup
+    startupRecovery: process.env.STARTUP_RECOVERY !== 'false',
+    // Delay (ms) before running heavy validation tasks after ready
+    startupValidationDelayMs: parseInt(process.env.STARTUP_VALIDATION_DELAY_MS || '30000', 10)
   }
 };
 

@@ -1,8 +1,58 @@
-const comprehensiveLogger = require('./comprehensiveLogger');
+let comprehensiveLogger;
+try {
+  comprehensiveLogger = require('./comprehensiveLogger');
+} catch (e) {
+  // Fallback will be created below
+  comprehensiveLogger = null;
+}
+
+// Create a safe fallback logger to prevent crashes if comprehensiveLogger is unavailable
+const createFallbackLogger = () => {
+  const noop = () => {};
+  const basic = console;
+  return {
+    origins: {
+      SYSTEM: 'system',
+      API: 'api',
+      API_LIVE: 'api_live',
+      USER_INPUT: 'user_input',
+      VALIDATION: 'validation',
+      RECONCILIATION: 'reconciliation',
+      DISCORD: 'discord',
+      DATABASE: 'database',
+      CACHE: 'cache'
+    },
+    eventCategories: {
+      SYNC: 'sync',
+      SKIP: 'skip',
+      VALIDATION: 'validation',
+      RECONCILIATION: 'reconciliation',
+      MUTATION: 'mutation',
+      STATUS_CONVERSION: 'status_conversion',
+      CONVERSION: 'conversion'
+    },
+    info: (...args) => basic.info(...args),
+    warn: (...args) => basic.warn(...args),
+    error: (...args) => basic.error(...args),
+    debug: (...args) => basic.debug ? basic.debug(...args) : basic.log(...args),
+    logSync: noop,
+    logSkip: noop,
+    logValidation: noop,
+    logReconciliation: noop,
+    logThreadTransition: noop,
+    logStatusConversion: noop,
+    logResultThreadConversion: noop,
+  };
+};
 
 class DataValidationService {
   constructor() {
-    this.logger = comprehensiveLogger;
+    this.logger = comprehensiveLogger || createFallbackLogger();
+    // Explicit debug to confirm which logger is in use
+    try {
+      const usingFallback = this.logger && !this.logger.getLoggerStats;
+      console.log(`🪵 DataValidationService logger initialized: ${usingFallback ? 'fallback' : 'comprehensive'}`);
+    } catch {}
   }
 
   /**
@@ -103,8 +153,8 @@ class DataValidationService {
           result.recommendations.push('Normal status progression detected');
           
           // Log normal status progression
-          comprehensiveLogger.logStatusConversion('status_progression', 'status_change', {
-            origin: comprehensiveLogger.origins.API_LIVE,
+          this.logger.logStatusConversion('status_progression', 'status_change', {
+            origin: this.logger.origins.API_LIVE,
             reasoning: 'Normal match status progression detected from API',
             previousStatus: existingData.status,
             newStatus: newData.status,
@@ -119,8 +169,8 @@ class DataValidationService {
           result.issues.push('Unusual status change pattern detected');
           
           // Log concerning status regression
-          comprehensiveLogger.logStatusConversion('status_regression', 'status_change', {
-            origin: comprehensiveLogger.origins.API_LIVE,
+          this.logger.logStatusConversion('status_regression', 'status_change', {
+            origin: this.logger.origins.API_LIVE,
             reasoning: 'Concerning status regression detected - API data may be inconsistent',
             previousStatus: existingData.status,
             newStatus: newData.status,
@@ -306,6 +356,12 @@ class DataValidationService {
       forceUpdate = false
     } = options;
 
+    // Banner to confirm active version and logger type
+    try {
+      const usingFallback = this.logger && !this.logger.getLoggerStats;
+      console.log(`🧪 [DVS] performDataReconciliation ACTIVE • logger=${usingFallback ? 'fallback' : 'comprehensive'} • ctx=${context} • match=${matchId}`);
+    } catch {}
+
     const reconciliation = {
       action: 'skip',
       reason: '',
@@ -338,9 +394,9 @@ class DataValidationService {
         reconciliation.confidence = 'high';
         
         // Log forced update
-        comprehensiveLogger.logReconciliation('forced_update', freshData, {
+        this.logger.logReconciliation('forced_update', freshData, {
           matchId,
-          origin: comprehensiveLogger.origins.USER_INPUT,
+          origin: this.logger.origins.USER_INPUT,
           reasoning: 'Force update requested by user or system',
           action: 'update',
           confidence: 'high',
@@ -357,9 +413,9 @@ class DataValidationService {
         reconciliation.issues = validation.issues;
         
         // Log data validation skip
-        comprehensiveLogger.logSkip('reconciliation_update', freshData, {
+        this.logger.logSkip('reconciliation_update', freshData, {
           matchId,
-          origin: comprehensiveLogger.origins.VALIDATION,
+          origin: this.logger.origins.VALIDATION,
           reasoning: 'Invalid data detected during reconciliation - skipping to prevent corruption',
           context: { validationCategory: validation.errorCategory, context },
           validationIssues: validation.issues,
@@ -378,9 +434,9 @@ class DataValidationService {
         reconciliation.issues = validation.issues;
         
         // Log approved reconciliation update
-        comprehensiveLogger.logReconciliation('approved_update', freshData, {
+        this.logger.logReconciliation('approved_update', freshData, {
           matchId,
-          origin: comprehensiveLogger.origins.RECONCILIATION,
+          origin: this.logger.origins.RECONCILIATION,
           reasoning: validation.isMissing ? 
             'Reconciliation approved data restoration for missing information' :
             `Reconciliation approved update: ${reconciliation.reason}`,
@@ -416,9 +472,9 @@ class DataValidationService {
         reconciliation.confidence = 'high';
         
         // Log when no reconciliation update is needed
-        comprehensiveLogger.logSkip('reconciliation_update', freshData, {
+        this.logger.logSkip('reconciliation_update', freshData, {
           matchId,
-          origin: comprehensiveLogger.origins.RECONCILIATION,
+          origin: this.logger.origins.RECONCILIATION,
           reasoning: 'No changes made: existing data is up-to-date after reconciliation analysis',
           context: { 
             isFresher: validation.isFresher,

@@ -55,8 +55,12 @@ class FaceitBot {
         await this.db.initialize();
         console.log('✅ Database service initialized');
         
-        // Run recovery system if needed
-        await this.runRecoveryIfNeeded();
+        // Run recovery system if needed (configurable)
+        if (config.tuning.startupRecovery) {
+          await this.runRecoveryIfNeeded();
+        } else {
+          console.log('⏭️ Skipping startup recovery (STARTUP_RECOVERY=false)');
+        }
         
         // Clear all caches on startup
         await this.clearCachesOnStartup();
@@ -87,6 +91,23 @@ class FaceitBot {
         console.log('✅ Slash commands registered');
         
         console.log('🚀 Bot is ready and monitoring for matches!');
+        
+        // Defer heavy validation tasks to avoid blocking startup
+        setTimeout(async () => {
+          try {
+            console.log('⏳ Running deferred startup validation tasks...');
+            await this.performStartupThreadValidation();
+            // Run a light RSVP sync silently
+            try {
+              await this.discordService.refreshAllRsvpStatuses(true);
+            } catch (syncErr) {
+              console.warn('RSVP sync (deferred) encountered an issue:', syncErr.message);
+            }
+            console.log('✅ Deferred startup validation tasks completed');
+          } catch (deferErr) {
+            console.error('❌ Error in deferred startup validation tasks:', deferErr.message);
+          }
+        }, config.tuning.startupValidationDelayMs);
         
         // Perform initial match check
         setTimeout(() => {
@@ -122,6 +143,21 @@ class FaceitBot {
           await this.slashCommandHandler.handleSlashCommand(interaction);
         } catch (error) {
           console.error('Error handling slash command interaction:', error);
+        }
+      } else if (interaction.isAutocomplete()) {
+        try {
+          await this.slashCommandHandler.handleAutocomplete(interaction);
+        } catch (error) {
+          console.error('Error handling autocomplete interaction:', error);
+        }
+      } else if (interaction.isModalSubmit()) {
+        // Route edit-rsvp search modal
+        if (interaction.customId.startsWith('editrsvp_search_modal_')) {
+          try {
+            await this.buttonHandler.handleEditRsvpSearchModal(interaction);
+          } catch (error) {
+            console.error('Error handling search modal submit:', error);
+          }
         }
       } else {
         console.log(`❓ Unknown interaction type: ${interaction.type}`);
@@ -163,9 +199,9 @@ class FaceitBot {
   }
 
   /**
-   * Perform conservative thread validation on startup
-   * Only removes threads that are definitively invalid to prevent data loss
-   */
+    // Perform conservative thread validation (deferred at startup)
+    // Only removes threads that are definitively invalid to prevent data loss
+    */
   async performStartupThreadValidation() {
     try {
       console.log('🔍 Starting conservative thread validation on startup...');
@@ -236,19 +272,18 @@ class FaceitBot {
         userSearchResults: this.db.userSearchResults?.size || 0
       };
       
-      // Only clear volatile in-memory caches that should be refreshed
-      // DO NOT clear userMappings or rsvpStatus - these are critical for functionality
-      if (this.db.upcomingMatches) this.db.upcomingMatches = new Map();
-      if (this.db.userSearchResults) this.db.userSearchResults = new Map();
-      
-      // Clear match threads temporarily and reload from database to ensure consistency
-      if (this.db.matchThreads) this.db.matchThreads = new Map();
-await this.db.reloadMatchThreads();
+    // Only clear volatile in-memory caches that should be refreshed
+    // DO NOT clear userMappings or rsvpStatus - these are critical for functionality
+    if (this.db.upcomingMatches) this.db.upcomingMatches = new Map();
+    if (this.db.userSearchResults) this.db.userSearchResults = new Map();
     
-    // Perform conservative thread validation on startup
-    await this.performStartupThreadValidation();
-      
-      // Only clean up expired entries from database caches, don't delete everything
+    // Clear match threads temporarily and reload from database to ensure consistency
+    if (this.db.matchThreads) this.db.matchThreads = new Map();
+    await this.db.reloadMatchThreads();
+    
+    console.log('⏭️ Deferring thread validation to post-startup phase');
+    
+    // Only clean up expired entries from database caches, don't delete everything
       await this.db.cleanupExpiredApiCache();
       await this.db.cleanupExpiredCache();
       await this.db.cleanupExpiredTeamDataCache();
@@ -282,8 +317,8 @@ await this.db.reloadMatchThreads();
     try {
       console.log('🔍 Checking if recovery is needed...');
       
-      // Initialize recovery service
-      const recoveryService = new RecoveryService(this.db, this.discordService);
+      // Initialize recovery service (pass Discord client and database)
+      const recoveryService = new RecoveryService(this.client, this.db);
       
       // Check if recovery is needed by examining database state
       const needsRecovery = await this.assessRecoveryNeeds();

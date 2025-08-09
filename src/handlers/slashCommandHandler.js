@@ -141,6 +141,17 @@ class SlashCommandHandler {
           .setDescription('Force refresh player data from FACEIT API')
           .setRequired(false));
 
+    // Edit RSVP command (Moderator or Admin)
+    const editRsvpCommand = new SlashCommandBuilder()
+      .setName('edit-rsvp')
+      .setDescription('Interactive: edit an RSVP with guided buttons (Moderator/Admin)')
+      .addStringOption(option =>
+        option.setName('user_query')
+          .setDescription('Filter users by FACEIT nickname or Discord username')
+          .setRequired(false)
+          .setAutocomplete(true)
+      );
+
     // Store command definitions
     this.commands.set('matches', matchesCommand);
     this.commands.set('profile', profileCommand);
@@ -162,6 +173,7 @@ class SlashCommandHandler {
     this.commands.set('backup-status', backupStatusCommand);
     this.commands.set('recovery', recoveryCommand);
     this.commands.set('team', teamCommand);
+    this.commands.set('edit-rsvp', editRsvpCommand);
   }
 
   /**
@@ -172,6 +184,8 @@ class SlashCommandHandler {
       console.log('🔄 Registering slash commands...');
       
       const commandData = Array.from(this.commands.values()).map(cmd => cmd.toJSON());
+      const commandNames = commandData.map(c => c.name);
+      console.log(`🧩 Preparing to register ${commandNames.length} commands: ${commandNames.join(', ')}`);
       
       // Register to guild for immediate testing (if DISCORD_GUILD_ID is set)
       // Otherwise register globally (takes up to 1 hour to propagate)
@@ -180,6 +194,7 @@ class SlashCommandHandler {
         if (guild) {
           await guild.commands.set(commandData);
           console.log(`✅ Successfully registered ${commandData.length} slash commands to guild ${guild.name}`);
+          console.log(`🧩 Commands registered to ${guild.name}: ${commandNames.join(', ')}`);
           
           // Clear any existing global commands to avoid duplicates
           await this.client.application.commands.set([]);
@@ -188,10 +203,12 @@ class SlashCommandHandler {
           console.log(`⚠️ Guild ${process.env.DISCORD_GUILD_ID} not found in cache, falling back to global registration`);
           await this.client.application.commands.set(commandData);
           console.log(`✅ Successfully registered ${commandData.length} slash commands globally`);
+          console.log(`🧩 Global commands: ${commandNames.join(', ')}`);
         }
       } else {
         await this.client.application.commands.set(commandData);
         console.log(`✅ Successfully registered ${commandData.length} slash commands globally`);
+        console.log(`🧩 Global commands: ${commandNames.join(', ')}`);
         console.log('🕰️ Global registration may take up to 1 hour to propagate across all servers');
       }
       
@@ -267,6 +284,9 @@ class SlashCommandHandler {
           break;
         case 'team':
           await this.handleTeamCommand(interaction);
+          break;
+        case 'edit-rsvp':
+          await this.handleEditRsvpCommand(interaction);
           break;
         default:
           await interaction.reply({ 
@@ -583,6 +603,22 @@ class SlashCommandHandler {
   }
 
   /**
+   * Determine if user has moderator privileges (Moderator role, ManageChannels, or configured admin)
+   */
+  hasModeratorPrivileges(interaction) {
+    const isConfiguredAdmin = config.adminDiscordId && interaction.user.id === config.adminDiscordId;
+    const hasManageChannels = interaction.member?.permissions.has(PermissionFlagsBits.ManageChannels);
+
+    // Check named Moderator role (by env/config) if member object and roles are available
+    const hasModeratorRole = !!interaction.member?.roles?.cache?.some?.(r => r.name === config.moderatorRoleName);
+
+    // Check explicit moderator allowlist from env
+    const inModeratorAllowlist = Array.isArray(config.moderatorDiscordIds) && config.moderatorDiscordIds.includes(interaction.user.id);
+
+    return isConfiguredAdmin || hasManageChannels || hasModeratorRole || inModeratorAllowlist;
+  }
+
+  /**
    * Handle /help command
    */
   async handleHelpCommand(interaction) {
@@ -631,6 +667,15 @@ class SlashCommandHandler {
           inline: false
         });
       }
+    }
+
+    // Add Moderator commands for users with moderator privileges (but who may not be full admins)
+    if (this.hasModeratorPrivileges(interaction)) {
+      embed.addFields({
+        name: '🛠️ Moderator Commands',
+        value: '`/edit-rsvp` - Manually set RSVP for a user on an INCOMING match',
+        inline: false
+      });
     }
 
     await interaction.reply({ embeds: [embed], flags: MessageFlags.Ephemeral });
@@ -1107,6 +1152,69 @@ class SlashCommandHandler {
     } catch (err) {
       console.error(`Error handling /clean-rsvp-status command: ${err.message}`);
       await interaction.editReply('❌ Sorry, there was an error cleaning RSVP status and refreshing threads.');
+    }
+  }
+
+  /**
+   * Handle /edit-rsvp command (Moderator/Admin)
+   */
+  async handleEditRsvpCommand(interaction) {
+    try {
+      // Permission check
+      if (!this.hasModeratorPrivileges(interaction)) {
+        await interaction.reply({
+          content: '❌ This command requires Moderator privileges (role, Manage Channels, or configured admin).',
+          flags: MessageFlags.Ephemeral
+        });
+        return;
+      }
+
+      await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+
+      // Stage 1: Select match (show upcoming matches)
+      const matches = await faceitService.getUpcomingMatches();
+      const userQuery = interaction.options?.getString('user_query') || '';
+      const queryToken = userQuery ? Buffer.from(userQuery).toString('base64url') : '';
+      if (!matches || matches.length === 0) {
+        await interaction.editReply('❌ No upcoming matches found to edit RSVP for.');
+        return;
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle('🛠️ Edit RSVP • Step 1: Select Match')
+        .setDescription('Choose an upcoming match to edit RSVPs for:')
+        .setColor(0xff5500)
+        .setTimestamp();
+
+      const components = [];
+      const max = Math.min(matches.length, 5); // limit to avoid too many buttons
+      for (let i = 0; i < max; i++) {
+        const m = matches[i];
+        const faction1 = m.teams.faction1?.name || 'TBD';
+        const faction2 = m.teams.faction2?.name || 'TBD';
+        const label = `${faction1} vs ${faction2}`.slice(0, 80);
+        const row = new ActionRowBuilder().addComponents(
+          new ButtonBuilder()
+            .setCustomId(`editrsvp_match_${m.match_id}${queryToken ? `_q_${queryToken}` : ''}`)
+            .setLabel(label)
+            .setStyle(ButtonStyle.Primary)
+        );
+        components.push(row);
+      }
+
+      if (matches.length > max) {
+        embed.setFooter({ text: `Showing ${max} of ${matches.length} matches` });
+      }
+
+      await interaction.editReply({ embeds: [embed], components });
+
+    } catch (err) {
+      console.error(`Error handling /edit-rsvp command: ${err.message}`);
+      if (interaction.replied || interaction.deferred) {
+        await interaction.editReply({ content: '❌ Sorry, there was an error starting the edit flow.' });
+      } else {
+        await interaction.reply({ content: '❌ Sorry, there was an error starting the edit flow.', flags: MessageFlags.Ephemeral });
+      }
     }
   }
 
@@ -1773,6 +1881,43 @@ class SlashCommandHandler {
           console.error(`Failed to edit reply for registration button interaction: ${replyError.message}`);
         }
       }
+    }
+  }
+
+  /**
+   * Handle autocomplete interactions
+   */
+  async handleAutocomplete(interaction) {
+    try {
+      if (interaction.commandName !== 'edit-rsvp') return;
+      const focused = interaction.options.getFocused(true);
+      if (!focused || focused.name !== 'user_query') return;
+
+      // Build suggestions from linked users
+      let mappings = Object.values(this.db.userMappings || {});
+      if (mappings.length === 0) {
+        // fallback to DB
+        try {
+          mappings = await this.db.getAllUserMappings();
+        } catch {}
+      }
+
+      const q = (focused.value || '').toString().toLowerCase();
+      const suggestions = [];
+      for (const m of mappings) {
+        const nick = m.faceit_nickname || '';
+        const uname = m.discord_username || '';
+        const id = m.discord_id || '';
+        const label = nick ? `${nick} (${uname})` : uname || id;
+        if (!q || label.toLowerCase().includes(q)) {
+          suggestions.push({ name: label.slice(0, 100), value: nick || uname || id });
+          if (suggestions.length >= 25) break;
+        }
+      }
+      await interaction.respond(suggestions);
+    } catch (err) {
+      console.error('Autocomplete error:', err.message);
+      try { await interaction.respond([]); } catch {}
     }
   }
 }

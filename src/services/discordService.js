@@ -92,12 +92,18 @@ class DiscordService {
       const freshMatch = await this.faceitService.getMatchDetails(match.match_id);
       const cachedMatch = this.db.upcomingMatches.get(match.match_id);
       
-      const reconciliation = await dataValidationService.performDataReconciliation({
-        freshData: freshMatch,
-        existingData: cachedMatch,
-        context: 'sendMatchNotification',
-        matchId: match.match_id
-      });
+      let reconciliation;
+      try {
+        reconciliation = await dataValidationService.performDataReconciliation({
+          freshData: freshMatch,
+          existingData: cachedMatch,
+          context: 'sendMatchNotification',
+          matchId: match.match_id
+        });
+      } catch (recErr) {
+        console.warn(`⚠️ Reconciliation step failed for match ${match.match_id}: ${recErr.message}. Proceeding with original match data.`);
+        reconciliation = { action: 'update', dataUsed: match, reason: 'reconciliation_failed_fallback' };
+      }
       
       if (reconciliation.action === 'skip') {
         // Log validation skip for notification

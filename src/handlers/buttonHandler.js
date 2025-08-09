@@ -1,4 +1,4 @@
-const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags } = require('discord.js');
+const { EmbedBuilder, ActionRowBuilder, ButtonBuilder, ButtonStyle, MessageFlags, ModalBuilder, TextInputBuilder, TextInputStyle } = require('discord.js');
 const config = require('../config/config');
 const InteractionLogService = require('../services/recovery/interactionLogService');
 
@@ -27,6 +27,28 @@ class ButtonHandler {
         return;
       }
       await this.slashCommandHandler.handleRegistrationButton(interaction);
+      return;
+    }
+
+    // Handle edit-rsvp staged buttons
+    if (interaction.customId.startsWith('editrsvp_match_')) {
+      await this.handleEditRsvpSelectUser(interaction);
+      return;
+    }
+    if (interaction.customId.startsWith('editrsvp_user_')) {
+      await this.handleEditRsvpSelectStatus(interaction);
+      return;
+    }
+    if (interaction.customId.startsWith('editrsvp_set_')) {
+      await this.handleEditRsvpSet(interaction);
+      return;
+    }
+    if (interaction.customId.startsWith('editrsvp_users_')) {
+      await this.handleEditRsvpUsersPage(interaction);
+      return;
+    }
+    if (interaction.customId.startsWith('editrsvp_search_')) {
+      await this.handleEditRsvpOpenSearch(interaction);
       return;
     }
 
@@ -128,6 +150,323 @@ class ButtonHandler {
       console.error(`Error handling button interaction: ${err.message}`);
       if (!interaction.replied) {
         await interaction.reply({ content: '❌ Sorry, there was an error processing your RSVP.', flags: MessageFlags.Ephemeral });
+      }
+    }
+  }
+
+  /**
+   * Stage 2: After selecting a match, present user buttons
+   */
+  async handleEditRsvpSelectUser(interaction) {
+    try {
+      const parts = interaction.customId.split('_');
+      const matchId = parts[2];
+      let query = '';
+      const qIndex = parts.findIndex(p => p === 'q');
+      if (qIndex >= 0 && parts[qIndex + 1]) {
+        try { query = Buffer.from(parts[qIndex + 1], 'base64url').toString('utf8'); } catch {}
+      }
+
+      // Load user mappings (prefer in-memory cache, fallback to DB)
+      let userMappings = Object.values(this.db.userMappings || {});
+      if (!userMappings || userMappings.length === 0) {
+        userMappings = await this.db.getAllUserMappings();
+      }
+
+      if (!userMappings || userMappings.length === 0) {
+        await interaction.reply({ content: '❌ No linked users found to edit.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // Apply optional search filter
+      const norm = s => (s || '').toString().toLowerCase();
+      if (query) {
+        userMappings = userMappings.filter(u =>
+          norm(u.faceit_nickname).includes(norm(query)) ||
+          norm(u.discord_username).includes(norm(query))
+        );
+      }
+
+      if (userMappings.length === 0) {
+        await interaction.reply({ content: '❌ No users match your search.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // Pagination
+      const page = 0;
+      await this.renderEditRsvpUsers(interaction, matchId, userMappings, page, query);
+    } catch (err) {
+      console.error(`Error in handleEditRsvpSelectUser: ${err.message}`);
+      if (!interaction.replied) {
+        await interaction.reply({ content: '❌ Error showing users.', flags: MessageFlags.Ephemeral });
+      }
+    }
+  }
+
+  async renderEditRsvpUsers(interaction, matchId, userMappings, page, query) {
+    const PAGE_SIZE = 25;
+    const totalPages = Math.max(1, Math.ceil(userMappings.length / PAGE_SIZE));
+    const current = Math.min(Math.max(0, page), totalPages - 1);
+    const start = current * PAGE_SIZE;
+    const pageItems = userMappings.slice(start, start + PAGE_SIZE);
+
+    const embed = new EmbedBuilder()
+      .setTitle('🛠️ Edit RSVP • Step 2: Select User')
+      .setDescription('Choose a user to set their RSVP:')
+      .setColor(0xff5500)
+      .setTimestamp();
+
+    if (query) {
+      embed.setFooter({ text: `Page ${current + 1}/${totalPages} • Filter: ${query}` });
+    } else {
+      embed.setFooter({ text: `Page ${current + 1}/${totalPages}` });
+    }
+
+    const rows = [];
+    for (let i = 0; i < pageItems.length; i += 5) {
+      const row = new ActionRowBuilder();
+      const slice = pageItems.slice(i, i + 5);
+      slice.forEach(u => {
+        const label = (u.faceit_nickname || u.discord_username || 'User').toString().slice(0, 80);
+        row.addComponents(
+          new ButtonBuilder()
+            .setCustomId(`editrsvp_user_${matchId}_${u.discord_id}`)
+            .setLabel(label)
+            .setStyle(ButtonStyle.Secondary)
+        );
+      });
+      rows.push(row);
+    }
+
+    // Controls row: Prev / Next / Search
+    const controls = new ActionRowBuilder();
+    const token = query ? `_q_${Buffer.from(query).toString('base64url')}` : '';
+
+    // Only include Prev/Next when there is more than one page to avoid duplicate IDs
+    if (totalPages > 1) {
+      controls.addComponents(
+        new ButtonBuilder()
+          .setCustomId(`editrsvp_users_${matchId}_p_${Math.max(0, current - 1)}${token}`)
+          .setLabel('⬅️ Prev')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(current === 0),
+        new ButtonBuilder()
+          .setCustomId(`editrsvp_users_${matchId}_p_${Math.min(totalPages - 1, current + 1)}${token}`)
+          .setLabel('Next ➡️')
+          .setStyle(ButtonStyle.Secondary)
+          .setDisabled(current >= totalPages - 1)
+      );
+    }
+
+    controls.addComponents(
+      new ButtonBuilder()
+        .setCustomId(`editrsvp_search_${matchId}${token}`)
+        .setLabel('🔎 Search')
+        .setStyle(ButtonStyle.Primary)
+    );
+
+    rows.push(controls);
+
+    const respond = interaction.replied || interaction.deferred ? 'followUp' : 'reply';
+    await interaction[respond]({ embeds: [embed], components: rows, flags: MessageFlags.Ephemeral });
+  }
+
+  async handleEditRsvpUsersPage(interaction) {
+    try {
+      // customId format: editrsvp_users_{matchId}_p_{page}[_q_{token}]
+      const parts = interaction.customId.split('_');
+      const matchId = parts[2];
+      const pageIndex = parts.indexOf('p');
+      const page = pageIndex >= 0 ? parseInt(parts[pageIndex + 1], 10) : 0;
+      let query = '';
+      const qIndex = parts.indexOf('q');
+      if (qIndex >= 0 && parts[qIndex + 1]) {
+        try { query = Buffer.from(parts[qIndex + 1], 'base64url').toString('utf8'); } catch {}
+      }
+
+      // Reload mappings and filter
+      let userMappings = Object.values(this.db.userMappings || {});
+      if (!userMappings || userMappings.length === 0) {
+        userMappings = await this.db.getAllUserMappings();
+      }
+      const norm = s => (s || '').toString().toLowerCase();
+      if (query) {
+        userMappings = userMappings.filter(u =>
+          norm(u.faceit_nickname).includes(norm(query)) ||
+          norm(u.discord_username).includes(norm(query))
+        );
+      }
+      if (userMappings.length === 0) {
+        await interaction.reply({ content: '❌ No users match your search.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // Edit the existing message in place if possible
+      await interaction.deferUpdate();
+
+      const PAGE_SIZE = 25;
+      const totalPages = Math.max(1, Math.ceil(userMappings.length / PAGE_SIZE));
+      const current = Math.min(Math.max(0, page), totalPages - 1);
+      const start = current * PAGE_SIZE;
+      const pageItems = userMappings.slice(start, start + PAGE_SIZE);
+
+      const embed = new EmbedBuilder()
+        .setTitle('🛠️ Edit RSVP • Step 2: Select User')
+        .setDescription('Choose a user to set their RSVP:')
+        .setColor(0xff5500)
+        .setTimestamp()
+        .setFooter({ text: `Page ${current + 1}/${totalPages}${query ? ` • Filter: ${query}` : ''}` });
+
+      const rows = [];
+      for (let i = 0; i < pageItems.length; i += 5) {
+        const row = new ActionRowBuilder();
+        const slice = pageItems.slice(i, i + 5);
+        slice.forEach(u => {
+          const label = (u.faceit_nickname || u.discord_username || 'User').toString().slice(0, 80);
+          row.addComponents(
+            new ButtonBuilder()
+              .setCustomId(`editrsvp_user_${matchId}_${u.discord_id}`)
+              .setLabel(label)
+              .setStyle(ButtonStyle.Secondary)
+          );
+        });
+        rows.push(row);
+      }
+
+      const controls = new ActionRowBuilder();
+      const token = query ? `_q_${Buffer.from(query).toString('base64url')}` : '';
+
+      if (totalPages > 1) {
+        controls.addComponents(
+          new ButtonBuilder().setCustomId(`editrsvp_users_${matchId}_p_${Math.max(0, current - 1)}${token}`).setLabel('⬅️ Prev').setStyle(ButtonStyle.Secondary).setDisabled(current === 0),
+          new ButtonBuilder().setCustomId(`editrsvp_users_${matchId}_p_${Math.min(totalPages - 1, current + 1)}${token}`).setLabel('Next ➡️').setStyle(ButtonStyle.Secondary).setDisabled(current >= totalPages - 1)
+        );
+      }
+
+      controls.addComponents(
+        new ButtonBuilder().setCustomId(`editrsvp_search_${matchId}${token}`).setLabel('🔎 Search').setStyle(ButtonStyle.Primary)
+      );
+
+      rows.push(controls);
+
+      await interaction.message.edit({ embeds: [embed], components: rows });
+    } catch (err) {
+      console.error(`Error in handleEditRsvpUsersPage: ${err.message}`);
+      if (!interaction.replied) {
+        await interaction.followUp({ content: '❌ Error changing page.', ephemeral: true });
+      }
+    }
+  }
+
+  async handleEditRsvpOpenSearch(interaction) {
+    try {
+      const parts = interaction.customId.split('_');
+      const matchId = parts[2];
+      const modal = new ModalBuilder()
+        .setCustomId(`editrsvp_search_modal_${matchId}`)
+        .setTitle('Search Users');
+
+      const input = new TextInputBuilder()
+        .setCustomId('query')
+        .setLabel('Enter nickname or username')
+        .setMaxLength(100)
+        .setStyle(TextInputStyle.Short)
+        .setRequired(false);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(input));
+      await interaction.showModal(modal);
+    } catch (err) {
+      console.error(`Error opening search modal: ${err.message}`);
+    }
+  }
+
+  /**
+   * Stage 3: After selecting a user, present Yes/No buttons
+   */
+  async handleEditRsvpSelectStatus(interaction) {
+    try {
+      const parts = interaction.customId.split('_');
+      const matchId = parts[2];
+      const targetUserId = parts[3];
+
+      // Fetch mapping for label
+      let mapping = this.db.userMappings?.[targetUserId];
+      if (!mapping) {
+        mapping = (await this.db.getUserMappingByDiscordIdFromDB(targetUserId)) || { faceit_nickname: 'Unknown' };
+      }
+
+      const embed = new EmbedBuilder()
+        .setTitle('🛠️ Edit RSVP • Step 3: Set Status')
+        .setDescription(`Match: \`${matchId}\`\nUser: **${mapping.faceit_nickname}** (<@${targetUserId}>)`)
+        .setColor(0xff5500)
+        .setTimestamp();
+
+      const row = new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`editrsvp_set_${matchId}_${targetUserId}_yes`).setLabel('✅ Yes').setStyle(ButtonStyle.Success),
+        new ButtonBuilder().setCustomId(`editrsvp_set_${matchId}_${targetUserId}_no`).setLabel('❌ No').setStyle(ButtonStyle.Danger)
+      );
+
+      await interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
+    } catch (err) {
+      console.error(`Error in handleEditRsvpSelectStatus: ${err.message}`);
+      if (!interaction.replied) {
+        await interaction.reply({ content: '❌ Error showing status options.', flags: MessageFlags.Ephemeral });
+      }
+    }
+  }
+
+  /**
+   * Stage 4: Persist RSVP and update thread
+   */
+  async handleEditRsvpSet(interaction) {
+    try {
+      const parts = interaction.customId.split('_');
+      const matchId = parts[2];
+      const targetUserId = parts[3];
+      const response = parts[4]; // yes | no
+
+      // Permission check (defensive)
+      if (!this.slashCommandHandler?.hasModeratorPrivileges?.(interaction)) {
+        await interaction.reply({ content: '❌ You lack permission to edit RSVPs.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // Ensure user mapping exists
+      const userMapping = await this.db.getUserMappingByDiscordIdFromDB(targetUserId);
+      if (!userMapping) {
+        await interaction.reply({ content: '❌ Selected user is not linked to a FACEIT account.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // Validate thread
+      const threadId = this.db.matchThreads?.get(matchId);
+      if (!threadId) {
+        await interaction.reply({ content: `❌ No Discord thread found for match ${matchId}.`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      let thread;
+      try { thread = await this.client.channels.fetch(threadId); } catch {}
+      if (!thread || !thread.name || !thread.name.startsWith('INCOMING:')) {
+        await interaction.reply({ content: `❌ Thread for match ${matchId} is not an INCOMING thread.`, flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      const existing = this.db.getUserRsvp(matchId, targetUserId);
+      await this.db.addRsvp(matchId, targetUserId, response, userMapping.faceit_nickname);
+
+      await this.discordService.updateThreadRsvpStatus(matchId, thread);
+
+      const emoji = response === 'yes' ? '✅' : '❌';
+      const action = existing ? 'updated' : 'recorded';
+      await interaction.reply({
+        content: `${emoji} RSVP ${action} for **${userMapping.faceit_nickname}** (<@${targetUserId}>) on match \`${matchId}\`: ${response.toUpperCase()}`,
+        flags: MessageFlags.Ephemeral
+      });
+    } catch (err) {
+      console.error(`Error in handleEditRsvpSet: ${err.message}`);
+      if (!interaction.replied) {
+        await interaction.reply({ content: '❌ Error setting RSVP.', flags: MessageFlags.Ephemeral });
       }
     }
   }
@@ -313,6 +652,42 @@ class ButtonHandler {
   /**
    * Handle analyze enemy button
    */
+  async handleEditRsvpSearchModal(interaction) {
+    try {
+      // customId: editrsvp_search_modal_{matchId}
+      const parts = interaction.customId.split('_');
+      const matchId = parts[3];
+      const query = interaction.fields.getTextInputValue('query') || '';
+
+      // Load mappings
+      let userMappings = Object.values(this.db.userMappings || {});
+      if (!userMappings || userMappings.length === 0) {
+        userMappings = await this.db.getAllUserMappings();
+      }
+
+      const norm = s => (s || '').toString().toLowerCase();
+      const filtered = query
+        ? userMappings.filter(u =>
+            norm(u.faceit_nickname).includes(norm(query)) ||
+            norm(u.discord_username).includes(norm(query))
+          )
+        : userMappings;
+
+      if (filtered.length === 0) {
+        await interaction.reply({ content: '❌ No users match your search.', flags: MessageFlags.Ephemeral });
+        return;
+      }
+
+      // Show first page with filter applied
+      await this.renderEditRsvpUsers(interaction, matchId, filtered, 0, query);
+    } catch (err) {
+      console.error(`Error handling search modal submit: ${err.message}`);
+      if (!interaction.replied) {
+        await interaction.reply({ content: '❌ Error applying search.', flags: MessageFlags.Ephemeral });
+      }
+    }
+  }
+
   async handleAnalyzeEnemyButton(interaction) {
     try {
       const faceitService = require('../services/faceitService');
