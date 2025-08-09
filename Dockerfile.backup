@@ -19,10 +19,10 @@ RUN npm ci --only=production && npm cache clean --force
 # Copy source code (only backup-related files)
 COPY src/utils ./src/utils
 COPY src/services/backupService.js ./src/services/
-COPY scripts/backup.js ./scripts/
 
-# Create a simple backup script
-RUN cat > /app/scripts/backup.js << 'EOF'
+# Create a simple backup script (no need to COPY from host)
+RUN mkdir -p /app/scripts \
+ && cat > /app/scripts/backup.js << 'EOF'
 const BackupService = require('../src/services/backupService');
 const path = require('path');
 

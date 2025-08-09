@@ -107,7 +107,7 @@ data/
 backups/
 
 # Backup and temporary files
-Dockerfile.backup
+# Keep Dockerfile.backup in context so the backup image can build
 restore-backup.js
 *.backup
 *.bak

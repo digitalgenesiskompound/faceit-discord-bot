@@ -1,32 +1,39 @@
-# Optimized single-stage build for maximum speed
+# Optimized single-stage build for speed and small size
 FROM node:lts-alpine
 
-# Install only runtime dependencies (no build tools needed)
-RUN apk add --no-cache curl sqlite && \
-    rm -rf /var/cache/apk/*
+# Explicit production env
+ENV NODE_ENV=production
+
+# Install only runtime packages needed at run time
+RUN apk add --no-cache curl sqlite \
+ && rm -rf /var/cache/apk/*
 
 WORKDIR /app
 
-# Copy package files first for better caching
+# Copy package manifests first to leverage layer caching
 COPY package*.json ./
 
-# Install dependencies with optimizations for speed
-# Using npm install for better pre-built binary compatibility
-RUN npm install --only=production --prefer-offline --no-audit --no-fund --silent && \
-    npm cache clean --force
+# Use npm ci when lockfile is present for reproducible installs, fallback to install
+RUN if [ -f package-lock.json ]; then \
+      npm ci --omit=dev --no-audit --no-fund --silent; \
+    else \
+      npm install --only=production --prefer-offline --no-audit --no-fund --silent; \
+    fi \
+ && npm cache clean --force
 
-# Copy application source code and database module (changes most frequently, so it's last)
+# Copy application source
 COPY --chown=node:node src/ ./src/
 
-# Create data, logs, and backups directories
-RUN mkdir -p /app/data /app/logs /app/backups && chown -R node:node /app/data /app/logs /app/backups
+# Create runtime directories with correct ownership
+RUN mkdir -p /app/data /app/logs /app/backups \
+ && chown -R node:node /app
 
-# Health check using curl instead of wget
+# Health check endpoint
 HEALTHCHECK --interval=60s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -f http://localhost:8080/health || exit 1
 
-# Run as non-root user
+# Drop privileges
 USER node
 
-# Start the app (modular version)
+# Start the bot
 CMD ["node", "src/bot.js"]

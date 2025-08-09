@@ -1,11 +1,11 @@
 services:
   bot:
-    build: 
+    build:
       context: .
       dockerfile: Dockerfile
     container_name: faceit-discord-bot
     restart: unless-stopped
-    user: "${UID:-1000}:${GID:-1000}"  # Run as host user to match file permissions
+    # Let the image run as its internal 'node' user to avoid host UID/GID issues (especially on Windows)
     env_file: .env
     volumes:
       - ./data:/app/data
@@ -14,6 +14,8 @@ services:
       - "8080:8080"  # Health check endpoint
     environment:
       - NODE_ENV=production
+      - STARTUP_RECOVERY=${STARTUP_RECOVERY:-true}
+      - STARTUP_VALIDATION_DELAY_MS=${STARTUP_VALIDATION_DELAY_MS:-30000}
       - RESTORE_BACKUP_ON_START=${RESTORE_BACKUP_ON_START:-false}
       - RESTORE_BACKUP_FILE=${RESTORE_BACKUP_FILE:-}
     logging:
