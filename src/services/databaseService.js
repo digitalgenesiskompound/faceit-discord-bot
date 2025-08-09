@@ -245,6 +245,27 @@ class DatabaseService {
     // The optimized cache service handles RSVP data separately from match data
   }
 
+  async removeRsvp(matchId, discordId) {
+    try {
+      // Remove from database
+      await this.db.removeUserRsvp(matchId, discordId);
+      
+      // Update memory cache
+      if (this.rsvpStatus[matchId] && this.rsvpStatus[matchId][discordId]) {
+        delete this.rsvpStatus[matchId][discordId];
+        if (Object.keys(this.rsvpStatus[matchId]).length === 0) {
+          delete this.rsvpStatus[matchId];
+        }
+      }
+      
+      console.log('RSVP cleared:', { matchId, discordId });
+      return true;
+    } catch (err) {
+      console.error(`Error clearing RSVP: ${err.message}`);
+      return false;
+    }
+  }
+
   // Processed matches methods
   markMatchAsProcessed(matchId) {
     if (!this.processedMatches.includes(matchId)) {

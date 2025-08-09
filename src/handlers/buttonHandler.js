@@ -403,7 +403,8 @@ class ButtonHandler {
 
       const row = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId(`editrsvp_set_${matchId}_${targetUserId}_yes`).setLabel('✅ Yes').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId(`editrsvp_set_${matchId}_${targetUserId}_no`).setLabel('❌ No').setStyle(ButtonStyle.Danger)
+        new ButtonBuilder().setCustomId(`editrsvp_set_${matchId}_${targetUserId}_no`).setLabel('❌ No').setStyle(ButtonStyle.Danger),
+        new ButtonBuilder().setCustomId(`editrsvp_set_${matchId}_${targetUserId}_clear`).setLabel('⏳ No Response').setStyle(ButtonStyle.Secondary)
       );
 
       await interaction.reply({ embeds: [embed], components: [row], flags: MessageFlags.Ephemeral });
@@ -423,7 +424,7 @@ class ButtonHandler {
       const parts = interaction.customId.split('_');
       const matchId = parts[2];
       const targetUserId = parts[3];
-      const response = parts[4]; // yes | no
+      const response = parts[4]; // yes | no | clear
 
       // Permission check (defensive)
       if (!this.slashCommandHandler?.hasModeratorPrivileges?.(interaction)) {
@@ -453,14 +454,26 @@ class ButtonHandler {
       }
 
       const existing = this.db.getUserRsvp(matchId, targetUserId);
-      await this.db.addRsvp(matchId, targetUserId, response, userMapping.faceit_nickname);
+
+      if (response === 'clear') {
+        await this.db.removeRsvp(matchId, targetUserId);
+      } else {
+        await this.db.addRsvp(matchId, targetUserId, response, userMapping.faceit_nickname);
+      }
 
       await this.discordService.updateThreadRsvpStatus(matchId, thread);
 
-      const emoji = response === 'yes' ? '✅' : '❌';
-      const action = existing ? 'updated' : 'recorded';
+      let content;
+      if (response === 'clear') {
+        content = `🧹 Cleared RSVP for **${userMapping.faceit_nickname}** (<@${targetUserId}>) on match \`${matchId}\`. Status set to: No Response`;
+      } else {
+        const emoji = response === 'yes' ? '✅' : '❌';
+        const action = existing ? 'updated' : 'recorded';
+        content = `${emoji} RSVP ${action} for **${userMapping.faceit_nickname}** (<@${targetUserId}>) on match \`${matchId}\`: ${response.toUpperCase()}`;
+      }
+
       await interaction.reply({
-        content: `${emoji} RSVP ${action} for **${userMapping.faceit_nickname}** (<@${targetUserId}>) on match \`${matchId}\`: ${response.toUpperCase()}`,
+        content,
         flags: MessageFlags.Ephemeral
       });
     } catch (err) {
