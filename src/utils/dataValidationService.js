@@ -1,4 +1,4 @@
-const comprehensiveLogger = require('./logger');
+const comprehensiveLogger = require('./comprehensiveLogger');
 
 class DataValidationService {
   constructor() {
