@@ -2209,8 +2209,9 @@ console.log(`🔄 Starting reconciliation of existing threads with conservative 
           
           try {
             const faceitService = require('./faceitService');
-            freshApiMatch = await faceitService.getMatchDetails(threadRecord.match_id);
-            console.log(`✅ [ENHANCED] Retrieved fresh API data for match ${threadRecord.match_id}, status: ${freshApiMatch?.status}, finished_at: ${freshApiMatch?.finished_at}`);
+            // Bypass cache to avoid stale SCHEDULED status blocking conversions
+            freshApiMatch = await faceitService.getMatchDetailsFresh(threadRecord.match_id);
+            console.log(`✅ [ENHANCED] Retrieved FRESH API data for match ${threadRecord.match_id}, status: ${freshApiMatch?.status}, finished_at: ${freshApiMatch?.finished_at}`);
           } catch (apiErr) {
             freshApiError = apiErr.message;
             console.log(`❌ [ENHANCED] Failed to fetch fresh API data for match ${threadRecord.match_id}: ${freshApiError}`);

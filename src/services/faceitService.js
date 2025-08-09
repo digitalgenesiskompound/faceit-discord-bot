@@ -341,6 +341,21 @@ class FaceitService {
   }
 
   /**
+   * Fetch match details bypassing cache (for time-sensitive validation like conversion)
+   */
+  async getMatchDetailsFresh(matchId) {
+    console.log(`🔍 Fetching FRESH match details for: ${matchId}`);
+    return await this.makeProtectedApiRequest(
+      `https://open.faceit.com/data/v4/matches/${matchId}`,
+      {},
+      {
+        operation: 'get_match_details_fresh',
+        matchId: matchId
+      }
+    );
+  }
+
+  /**
    * Get player data by nickname - optimized with caching
    */
   async getPlayerByNickname(nickname) {
